@@ -91,7 +91,14 @@ class Mp4DownloadService : Service() {
             } catch (e: Exception) {
                 Log.e("VkDownloader", "MP4 background download failed", e)
                 nm.notify(NOTIFICATION_ID, notification("Ошибка загрузки", 0, 0, 0, false, e.message ?: "Повторите попытку"))
-            } finally { downloadJob = null; stopForeground(STOP_FOREGROUND_DETACH); stopSelf(startId) }
+            } finally {
+                // Do not detach the foreground notification: that leaves the stale
+                // "download still running in background" notification visible.
+                downloadJob = null
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                nm.cancel(NOTIFICATION_ID)
+                stopSelf(startId)
+            }
         }
         return START_NOT_STICKY
     }
