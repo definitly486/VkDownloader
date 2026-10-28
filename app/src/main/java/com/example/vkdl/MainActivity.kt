@@ -2,10 +2,14 @@ package com.example.vkdl
 
 import android.Manifest
 import android.app.DownloadManager
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.app.Activity
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -23,28 +27,32 @@ import android.util.Log
 import android.view.View
 import android.view.WindowManager
 import android.widget.*
-import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
+import android.app.AlertDialog
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
+import java.net.HttpURLConnection
+import java.net.URL
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.IOException
+import java.util.concurrent.atomic.AtomicLong
 import java.net.URI
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+
+private const val RANGE_NOTIFICATION_ID = 4102
+private const val RANGE_NOTIFICATION_CHANNEL = "vk_range_downloads"
 
 private const val UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -69,20 +77,27 @@ private class MuxSrc(val ex: MediaExtractor) {
 private class HlsKey(val uri: String, val iv: ByteArray?)
 private class HlsSeg(val url: String, val seq: Long, val key: HlsKey?)
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : Activity() {
 
-    private val http = OkHttpClient()
+    private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val ui = Handler(Looper.getMainLooper())
 
     private lateinit var input: EditText
     private lateinit var button: Button
     private lateinit var progress: ProgressBar
+    private lateinit var downloadProgress: ProgressBar
     private lateinit var status: TextView
 
     private var videoId = "video"
+    private var activeDownloadId = -1L
+    private var lastDownloadBytes = 0L
+    private var lastDownloadSampleMs = 0L
+    private var downloadSpeedBytesPerSec = 0L
+    private var downloadPoll: Runnable? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        createRangeNotificationChannel()
 
         val pad = (16 * resources.displayMetrics.density).toInt()
         val root = LinearLayout(this).apply {
@@ -99,11 +114,18 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { search() }
         }
         progress = ProgressBar(this).apply { visibility = View.GONE }
+        downloadProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progress = 0
+            visibility = View.GONE
+            isIndeterminate = false
+        }
         status = TextView(this).apply { setTextIsSelectable(true) }
 
         root.addView(input)
         root.addView(button)
         root.addView(progress)
+        root.addView(downloadProgress)
         root.addView(status)
         setContentView(root)
 
@@ -120,6 +142,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         ui.removeCallbacksAndMessages(null)
+        activityScope.cancel()
         super.onDestroy()
     }
 
@@ -135,14 +158,14 @@ class MainActivity : AppCompatActivity() {
     private fun askPermissions() {
         val need = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED
         ) need += Manifest.permission.POST_NOTIFICATIONS
         if (Build.VERSION.SDK_INT <= 28 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
             != PackageManager.PERMISSION_GRANTED
         ) need += Manifest.permission.WRITE_EXTERNAL_STORAGE
-        if (need.isNotEmpty()) ActivityCompat.requestPermissions(this, need.toTypedArray(), 1)
+        if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), 1)
     }
 
     /** Сохраняет стектрейс падения в файл, чтобы показать его при следующем запуске. */
@@ -177,11 +200,12 @@ class MainActivity : AppCompatActivity() {
     // ---------- поиск вариантов ----------
 
     private fun search() {
+        stopDownloadPolling()
         val text = input.text.toString()
         setBusy(true)
         status.text = "Загрузка информации…"
 
-        lifecycleScope.launch {
+        activityScope.launch {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
                     var ids = parseIds(text)
@@ -223,40 +247,63 @@ class MainActivity : AppCompatActivity() {
         return null
     }
 
-    private fun resolveRedirect(url: String): String =
-        http.newCall(buildReq(url)).execute().use { it.request.url.toString() }
-
-    private fun buildReq(url: String) = Request.Builder()
-        .url(url)
-        .header("User-Agent", UA)
-        .header("Referer", "https://vk.com/")
-        .header("Origin", "https://vk.com")
-        .header("Accept-Language", "ru,en;q=0.8")
-        .build()
-
-    private fun httpGet(url: String): String =
-        http.newCall(buildReq(url)).execute().use { resp ->
-            if (!resp.isSuccessful) error("HTTP ${resp.code} (${URI(url).host})")
-            resp.body?.string().orEmpty()
+    private fun openHttp(
+        url: String,
+        method: String = "GET",
+        headers: Map<String, String> = emptyMap(),
+        body: ByteArray? = null
+    ): HttpURLConnection = (URL(url).openConnection() as HttpURLConnection).apply {
+        requestMethod = method
+        instanceFollowRedirects = true
+        connectTimeout = 20_000
+        readTimeout = 45_000
+        setRequestProperty("User-Agent", UA)
+        setRequestProperty("Referer", "https://vk.com/")
+        setRequestProperty("Origin", "https://vk.com")
+        setRequestProperty("Accept-Language", "ru,en;q=0.8")
+        headers.forEach { (key, value) -> setRequestProperty(key, value) }
+        if (body != null) {
+            doOutput = true
+            setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+            outputStream.use { it.write(body) }
         }
+    }
+
+    private fun resolveRedirect(url: String): String = openHttp(url).run {
+        try { responseCode; this.url.toString() } finally { disconnect() }
+    }
+
+    private fun httpGet(url: String): String = openHttp(url).run {
+        try {
+            val code = responseCode
+            if (code !in 200..299) error("HTTP $code (${URI(url).host})")
+            inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        } finally { disconnect() }
+    }
 
     private fun fetchBytes(url: String): ByteArray {
         var last: Exception? = null
         repeat(3) {
             try {
-                return http.newCall(buildReq(url)).execute().use { r ->
-                    if (!r.isSuccessful) error("HTTP ${r.code} (${URI(url).host})")
-                    r.body!!.bytes()
+                return openHttp(url).run {
+                    try {
+                        val code = responseCode
+                        if (code !in 200..299) error("HTTP $code (${URI(url).host})")
+                        inputStream.use { it.readBytes() }
+                    } finally { disconnect() }
                 }
-            } catch (e: Exception) {
-                last = e
-            }
+            } catch (e: Exception) { last = e }
         }
         throw last!!
     }
 
-    private fun httpFetch(url: String): Pair<Int, String> =
-        http.newCall(buildReq(url)).execute().use { it.code to it.body?.string().orEmpty() }
+    private fun httpFetch(url: String): Pair<Int, String> = openHttp(url).run {
+        try {
+            val code = responseCode
+            val stream = if (code in 200..299) inputStream else errorStream
+            code to (stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty())
+        } finally { disconnect() }
+    }
 
     private fun hintFrom(body: String): String =
         Regex("""[^<>"{}]{0,60}(?:не найден|недоступн|удал[её]н|приватн|ограничен)[^<>"{}]{0,60}""",
@@ -322,21 +369,21 @@ class MainActivity : AppCompatActivity() {
             "${java.net.URLEncoder.encode(k, "UTF-8")}=${java.net.URLEncoder.encode(v, "UTF-8")}"
         }
 
-        val mediaType = "application/x-www-form-urlencoded; charset=UTF-8".toMediaType()
-        val req = Request.Builder()
-            .url("https://vk.com/al_video.php")
-            .post(body.toRequestBody(mediaType))
-            .header("User-Agent", UA)
-            .header("Referer", "https://vk.com/video$video")
-            .header("Origin", "https://vk.com")
-            .header("X-Requested-With", "XMLHttpRequest")
-            .header("Accept", "*/*")
-            .header("Accept-Language", "ru,en;q=0.8")
-            .build()
-
-        val json = http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) error("HTTP ${resp.code}")
-            resp.body?.string().orEmpty()
+        val json = openHttp(
+            "https://vk.com/al_video.php",
+            method = "POST",
+            headers = mapOf(
+                "Referer" to "https://vk.com/video$video",
+                "X-Requested-With" to "XMLHttpRequest",
+                "Accept" to "*/*"
+            ),
+            body = body.toByteArray(Charsets.UTF_8)
+        ).run {
+            try {
+                val code = responseCode
+                if (code !in 200..299) error("HTTP $code")
+                inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            } finally { disconnect() }
         }
         if (json.isBlank()) error("пустой ответ")
 
@@ -490,10 +537,239 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // ---------- mp4: системный DownloadManager (полностью в фоне) ----------
+    // ---------- MP4: проверяем HTTP Range и используем максимум 3 потока только при поддержке сервером ----------
 
     private fun downloadMp4(opt: VideoOption) {
+        stopDownloadPolling()
         val fileName = "vk_${videoId}_${opt.height}p.mp4"
+        downloadProgress.visibility = View.VISIBLE
+        downloadProgress.isIndeterminate = true
+        status.text = "Проверка поддержки ускоренной загрузки…\nЕсли сервер не поддерживает HTTP Range, будет использован системный загрузчик."
+        activityScope.launch {
+            try {
+                val total = withContext(Dispatchers.IO) { probeRangeSupport(opt.url) }
+                if (total == null || total < 2L * 1024L * 1024L) {
+                    // Для неподдерживаемого Range и небольших файлов оставляем надёжный системный DownloadManager.
+                    enqueueMp4WithDownloadManager(opt, fileName, if (total == null) "Сервер не поддерживает HTTP Range" else "Файл небольшой")
+                    return@launch
+                }
+                activeDownloadId = -2L // собственная загрузка; не является DownloadManager ID
+                downloadProgress.isIndeterminate = false
+                downloadProgress.progress = 0
+                status.text = "Ускоренная загрузка: $fileName\nHTTP Range подтверждён; используется до 4 соединений."
+                postRangeNotification(fileName, 0, total, 0L, ongoing = true)
+                withContext(Dispatchers.IO) { downloadMp4Ranges(opt.url, fileName, total) }
+                downloadProgress.progress = 100
+                status.text = "Загрузка завершена: $fileName\n${formatBytes(total)}\nСохранено в папку «Загрузки». Использовалось до 4 соединений."
+                postRangeNotification(fileName, 100, total, 0L, ongoing = false, completed = true)
+                activeDownloadId = -1L
+            } catch (e: Exception) {
+                activeDownloadId = -1L
+                (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(RANGE_NOTIFICATION_ID)
+                downloadProgress.visibility = View.GONE
+                status.text = "Ошибка ускоренной загрузки: ${e.message ?: e.javaClass.simpleName}\nПроверьте сеть и повторите попытку. Системный загрузчик не запускался автоматически, чтобы не скачивать файл повторно."
+                Log.e("VkDownloader", "Range MP4 download failed", e)
+            }
+        }
+    }
+
+    private fun createRangeNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                RANGE_NOTIFICATION_CHANNEL,
+                "Загрузка видео",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply { description = "Прогресс загрузки MP4 в VK Downloader" }
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(channel)
+        }
+    }
+
+    private fun postRangeNotification(
+        fileName: String, percent: Int, total: Long, speed: Long,
+        ongoing: Boolean, completed: Boolean = false
+    ) {
+        // Android 13+ скрывает уведомления, если пользователь не дал POST_NOTIFICATIONS.
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) return
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        val title = if (completed) "Загрузка завершена" else "Скачивание видео"
+        val detail = if (completed) "$fileName · ${formatBytes(total)}" else
+            "$fileName · $percent% · ${formatBytes(speed)}/с"
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            Notification.Builder(this, RANGE_NOTIFICATION_CHANNEL) else Notification.Builder(this)
+        val notification = builder
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setContentTitle(title)
+            .setContentText(detail)
+            .setStyle(Notification.BigTextStyle().bigText(detail))
+            .setOnlyAlertOnce(true)
+            .setOngoing(ongoing)
+            .setProgress(100, percent.coerceIn(0, 100), false)
+            .build()
+        manager.notify(RANGE_NOTIFICATION_ID, notification)
+    }
+
+    /** Returns the total length only if a real GET Range probe receives 206 and a valid Content-Range. */
+    private fun probeRangeSupport(url: String): Long? {
+        val c = (URL(url).openConnection() as HttpURLConnection).apply {
+            instanceFollowRedirects = true
+            connectTimeout = 15_000
+            readTimeout = 15_000
+            requestMethod = "GET"
+            setRequestProperty("User-Agent", UA)
+            setRequestProperty("Referer", "https://vk.com/")
+            setRequestProperty("Origin", "https://vk.com")
+            setRequestProperty("Range", "bytes=0-0")
+        }
+        return try {
+            val code = c.responseCode
+            val range = c.getHeaderField("Content-Range")
+            val match = Regex("""bytes\s+0-0/(\d+)""", RegexOption.IGNORE_CASE).matchEntire(range?.trim().orEmpty())
+            if (code == HttpURLConnection.HTTP_PARTIAL && match != null) {
+                // Read the one-byte probe so the connection is properly consumed before closing.
+                c.inputStream.use { it.read() }
+                match.groupValues[1].toLongOrNull()?.takeIf { it > 0L }
+            } else null
+        } finally {
+            c.disconnect()
+        }
+    }
+
+    private suspend fun downloadMp4Ranges(url: String, fileName: String, total: Long) {
+        // Четыре диапазона могут лучше использовать быстрый канал, если сервер допускает параллельные Range.
+        // Увеличение числа потоков не гарантирует скорость: лимит сервера/сети остаётся внешним.
+        val workerCount = 4
+        val chunkSize = (total + workerCount - 1) / workerCount
+        val downloaded = AtomicLong(0L)
+        val lastUiBytes = AtomicLong(0L)
+        val lastUiAt = AtomicLong(SystemClock.elapsedRealtime())
+        val speed = AtomicLong(0L)
+        val tempDir = File(cacheDir, "vk_range_${System.currentTimeMillis()}").apply {
+            if (!mkdirs()) throw IOException("Не удалось создать временную папку")
+        }
+        try {
+            coroutineScope {
+                (0 until workerCount).mapNotNull { index ->
+                    val start = index * chunkSize
+                    if (start >= total) return@mapNotNull null
+                    val end = minOf(total - 1L, start + chunkSize - 1L)
+                    async(Dispatchers.IO) {
+                        val part = File(tempDir, "part_$index")
+                        downloadRangePart(url, start, end, total, part) { count ->
+                            val nowBytes = downloaded.addAndGet(count.toLong())
+                            val now = SystemClock.elapsedRealtime()
+                            val oldAt = lastUiAt.get()
+                            if (now - oldAt >= 500L && lastUiAt.compareAndSet(oldAt, now)) {
+                                val before = lastUiBytes.getAndSet(nowBytes)
+                                val instant = ((nowBytes - before).coerceAtLeast(0L) * 1000L / (now - oldAt).coerceAtLeast(1L))
+                                speed.set(instant)
+                                val percent = (nowBytes * 100L / total).toInt().coerceIn(0, 99)
+                                ui.post {
+                                    if (activeDownloadId == -2L && !isFinishing) {
+                                        downloadProgress.progress = percent
+                                        status.text = "Ускоренная загрузка: $fileName\n${formatBytes(nowBytes)} / ${formatBytes(total)} ($percent%)\nСкорость: ${formatBytes(speed.get())}/с\nПотоков: $workerCount"
+                                    }
+                                    postRangeNotification(fileName, percent, total, speed.get(), ongoing = true)
+                                }
+                            }
+                        }
+                    }
+                }.awaitAll()
+            }
+            // Verify all parts before publishing the final file.
+            val expectedParts = (0 until workerCount).count { it * chunkSize < total }
+            val parts = (0 until expectedParts).map { File(tempDir, "part_$it") }
+            val sum = parts.sumOf { it.length() }
+            if (sum != total) throw IOException("Размер частей не совпадает: $sum из $total байт")
+            savePartsToDownloads(parts, fileName, total)
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    private fun downloadRangePart(
+        url: String, start: Long, end: Long, total: Long, output: File, onBytes: (Int) -> Unit
+    ) {
+        val c = (URL(url).openConnection() as HttpURLConnection).apply {
+            instanceFollowRedirects = true
+            connectTimeout = 20_000
+            readTimeout = 30_000
+            setRequestProperty("User-Agent", UA)
+            setRequestProperty("Referer", "https://vk.com/")
+            setRequestProperty("Origin", "https://vk.com")
+            setRequestProperty("Accept-Encoding", "identity")
+            setRequestProperty("Range", "bytes=$start-$end")
+        }
+        try {
+            val expectedHeader = "bytes $start-$end/$total"
+            val code = c.responseCode
+            if (code != HttpURLConnection.HTTP_PARTIAL || c.getHeaderField("Content-Range")?.trim() != expectedHeader) {
+                throw IOException("Сервер перестал поддерживать Range ($code); параллельная загрузка остановлена")
+            }
+            val expectedLength = end - start + 1L
+            var received = 0L
+            c.inputStream.use { input ->
+                FileOutputStream(output).use { out ->
+                    // Крупный буфер сокращает накладные расходы на чтение/запись.
+                    val buffer = ByteArray(256 * 1024)
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        out.write(buffer, 0, n)
+                        received += n
+                        onBytes(n)
+                        if (received > expectedLength) throw IOException("Сервер прислал лишние данные для диапазона")
+                    }
+                }
+            }
+            if (received != expectedLength) throw IOException("Неполный диапазон: получено $received из $expectedLength байт")
+        } finally {
+            c.disconnect()
+        }
+    }
+
+    private fun savePartsToDownloads(parts: List<File>, fileName: String, total: Long) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                put(MediaStore.Downloads.MIME_TYPE, "video/mp4")
+                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IOException("Не удалось создать файл в папке «Загрузки»")
+            try {
+                contentResolver.openOutputStream(uri, "w")?.use { out ->
+                    parts.forEach { part -> FileInputStream(part).use { input -> input.copyTo(out, 128 * 1024) } }
+                } ?: throw IOException("Не удалось открыть файл для записи")
+                val updated = ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
+                contentResolver.update(uri, updated, null, null)
+            } catch (e: Exception) {
+                contentResolver.delete(uri, null, null)
+                throw e
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            if (!dir.exists() && !dir.mkdirs()) throw IOException("Не удалось создать папку Downloads")
+            val target = File(dir, fileName)
+            if (target.exists()) throw IOException("Файл уже существует: $fileName")
+            try {
+                FileOutputStream(target).use { out ->
+                    parts.forEach { part -> FileInputStream(part).use { input -> input.copyTo(out, 128 * 1024) } }
+                }
+                if (target.length() != total) throw IOException("Итоговый размер файла не совпадает")
+            } catch (e: Exception) {
+                target.delete()
+                throw e
+            }
+        }
+    }
+
+    private fun enqueueMp4WithDownloadManager(opt: VideoOption, fileName: String, reason: String) {
+        stopDownloadPolling()
+        status.text = "$reason; используется системный загрузчик.\nФайл: $fileName"
         val req = DownloadManager.Request(Uri.parse(opt.url))
             .setTitle("VK · $fileName")
             .setDescription("Прямая ссылка ${opt.height}p — стандартный плеер")
@@ -512,17 +788,125 @@ class MainActivity : AppCompatActivity() {
 
         val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
         val id = dm.enqueue(req)
-
-        status.text = "Фоновая загрузка запущена\n" +
-            "Файл: $fileName\n" +
-            "ID: $id\n" +
-            "Можно свернуть или закрыть приложение — скачивание продолжится.\n" +
-            "Готовый файл появится в «Загрузки»."
+        activeDownloadId = id
+        lastDownloadBytes = 0L
+        lastDownloadSampleMs = SystemClock.elapsedRealtime()
+        downloadSpeedBytesPerSec = 0L
+        downloadProgress.progress = 0
+        downloadProgress.visibility = View.VISIBLE
+        status.text = "Загрузка: $fileName\nПодключение к серверу…\n" +
+            "Прогресс и скорость обновляются ниже. Скачивание продолжится в фоне."
+        startDownloadPolling(id, fileName)
         Toast.makeText(
             this,
             "Фоновая загрузка: $fileName\nМожно закрыть приложение",
             Toast.LENGTH_LONG
         ).show()
+    }
+
+    private fun startDownloadPolling(id: Long, fileName: String) {
+        val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        val poll = object : Runnable {
+            override fun run() {
+                if (activeDownloadId != id || isFinishing) return
+                val query = DownloadManager.Query().setFilterById(id)
+                val cursor = runCatching { dm.query(query) }.getOrNull()
+                if (cursor == null) {
+                    ui.postDelayed(this, 1000)
+                    return
+                }
+                cursor.use { c ->
+                    if (!c.moveToFirst()) {
+                        status.text = "Загрузка $fileName\nНе удалось получить состояние загрузки. Проверьте уведомления Android."
+                        downloadProgress.visibility = View.GONE
+                        activeDownloadId = -1L
+                        return
+                    }
+                    val downloaded = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+                    val total = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+                    val state = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+                    val now = SystemClock.elapsedRealtime()
+                    val elapsed = now - lastDownloadSampleMs
+                    if (elapsed >= 900) {
+                        val delta = (downloaded - lastDownloadBytes).coerceAtLeast(0L)
+                        val instant = delta * 1000L / elapsed
+                        downloadSpeedBytesPerSec = if (downloadSpeedBytesPerSec == 0L) instant
+                            else (downloadSpeedBytesPerSec * 2 + instant) / 3
+                        lastDownloadBytes = downloaded
+                        lastDownloadSampleMs = now
+                    }
+                    val knownTotal = total > 0L
+                    val percent = if (knownTotal) ((downloaded * 100L / total).toInt()).coerceIn(0, 100) else 0
+                    downloadProgress.isIndeterminate = !knownTotal && state == DownloadManager.STATUS_RUNNING
+                    if (knownTotal) downloadProgress.progress = percent
+                    val speed = formatBytes(downloadSpeedBytesPerSec) + "/с"
+                    val sizeText = if (knownTotal) "${formatBytes(downloaded)} / ${formatBytes(total)} ($percent%)"
+                        else "${formatBytes(downloaded)} скачано; размер неизвестен"
+                    val eta = if (knownTotal && downloadSpeedBytesPerSec > 0L && total > downloaded) {
+                        val sec = (total - downloaded) / downloadSpeedBytesPerSec
+                        "\nОсталось примерно ${sec / 60} мин ${sec % 60} с"
+                    } else ""
+                    when (state) {
+                        DownloadManager.STATUS_PENDING -> status.text = "Загрузка: $fileName\nОжидание начала…\n$sizeText\nСкорость: $speed"
+                        DownloadManager.STATUS_RUNNING -> status.text = "Загрузка: $fileName\n$sizeText\nСкорость: $speed$eta\nЗагрузка продолжится в фоне."
+                        DownloadManager.STATUS_PAUSED -> {
+                            val reason = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
+                            status.text = "Загрузка приостановлена: $fileName\n$sizeText\nПричина: ${downloadReason(reason)}"
+                        }
+                        DownloadManager.STATUS_SUCCESSFUL -> {
+                            downloadProgress.progress = 100
+                            downloadProgress.isIndeterminate = false
+                            status.text = "Загрузка завершена: $fileName\n${if (knownTotal) formatBytes(total) else formatBytes(downloaded)}\nФайл находится в папке «Загрузки»."
+                            activeDownloadId = -1L
+                            return
+                        }
+                        DownloadManager.STATUS_FAILED -> {
+                            val reason = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
+                            status.text = "Ошибка загрузки: $fileName\nКод: $reason (${downloadReason(reason)})"
+                            downloadProgress.visibility = View.GONE
+                            activeDownloadId = -1L
+                            return
+                        }
+                    }
+                }
+                ui.postDelayed(this, 1000)
+            }
+        }
+        downloadPoll = poll
+        ui.post(poll)
+    }
+
+    private fun stopDownloadPolling() {
+        downloadPoll?.let(ui::removeCallbacks)
+        downloadPoll = null
+        activeDownloadId = -1L
+        downloadProgress.visibility = View.GONE
+    }
+
+    private fun formatBytes(value: Long): String {
+        if (value < 1024L) return "$value Б"
+        val kb = value / 1024.0
+        if (kb < 1024.0) return "%.1f КБ".format(kb)
+        val mb = kb / 1024.0
+        if (mb < 1024.0) return "%.1f МБ".format(mb)
+        return "%.2f ГБ".format(mb / 1024.0)
+    }
+
+    private fun downloadReason(reason: Int): String = when (reason) {
+        DownloadManager.ERROR_CANNOT_RESUME -> "нельзя продолжить"
+        DownloadManager.ERROR_DEVICE_NOT_FOUND -> "накопитель не найден"
+        DownloadManager.ERROR_FILE_ALREADY_EXISTS -> "файл уже существует"
+        DownloadManager.ERROR_FILE_ERROR -> "ошибка файла"
+        DownloadManager.ERROR_HTTP_DATA_ERROR -> "ошибка передачи данных"
+        DownloadManager.ERROR_INSUFFICIENT_SPACE -> "недостаточно места"
+        DownloadManager.ERROR_TOO_MANY_REDIRECTS -> "слишком много перенаправлений"
+        DownloadManager.ERROR_UNHANDLED_HTTP_CODE -> "неподдерживаемый HTTP-код"
+        DownloadManager.ERROR_UNKNOWN -> "неизвестная ошибка"
+        DownloadManager.PAUSED_QUEUED_FOR_WIFI -> "ожидание Wi-Fi"
+        DownloadManager.PAUSED_WAITING_FOR_NETWORK -> "ожидание сети"
+        DownloadManager.PAUSED_WAITING_TO_RETRY -> "повторная попытка"
+        DownloadManager.PAUSED_UNKNOWN -> "приостановлено системой"
+        else -> "код $reason"
     }
 
     // ---------- HLS: свой загрузчик сегментов + (по возможности) ремукс в mp4 ----------

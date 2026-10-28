@@ -8,7 +8,6 @@ import android.app.Service
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.graphics.BitmapFactory
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -19,7 +18,6 @@ import android.os.Environment
 import android.os.IBinder
 import android.os.SystemClock
 import android.provider.MediaStore
-import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -29,13 +27,12 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
+import java.net.HttpURLConnection
+import java.net.URL
 import java.io.File
 import java.net.URI
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -79,10 +76,6 @@ class HlsDownloadService : Service() {
 
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.IO + job)
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .build()
     private lateinit var nm: NotificationManager
 
     private class MuxSrc(val ex: MediaExtractor) {
@@ -209,14 +202,14 @@ class HlsDownloadService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val largeIcon = BitmapFactory.decodeResource(resources, R.mipmap.ic_launcher)
-        val b = NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL_ID)
+            else Notification.Builder(this)
+        val b = builder
             .setContentTitle(title)
             .setContentText(text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setStyle(Notification.BigTextStyle().bigText(text))
             .setSmallIcon(android.R.drawable.stat_sys_download_done.takeIf { done }
                 ?: android.R.drawable.stat_sys_download)
-            .setLargeIcon(largeIcon)
             .setContentIntent(open)
             .setOnlyAlertOnce(true)
             .setOngoing(ongoing)
@@ -229,31 +222,37 @@ class HlsDownloadService : Service() {
 
     // ---------- network ----------
 
-    private fun buildReq(url: String) = Request.Builder()
-        .url(url)
-        .header("User-Agent", UA)
-        .header("Referer", "https://vk.com/")
-        .header("Origin", "https://vk.com")
-        .header("Accept-Language", "ru,en;q=0.8")
-        .build()
-
-    private fun httpGet(url: String): String =
-        http.newCall(buildReq(url)).execute().use { resp ->
-            if (!resp.isSuccessful) error("HTTP ${resp.code} (${URI(url).host})")
-            resp.body?.string().orEmpty()
+    private fun openHttp(url: String): HttpURLConnection =
+        (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 30_000
+            readTimeout = 60_000
+            instanceFollowRedirects = true
+            setRequestProperty("User-Agent", UA)
+            setRequestProperty("Referer", "https://vk.com/")
+            setRequestProperty("Origin", "https://vk.com")
+            setRequestProperty("Accept-Language", "ru,en;q=0.8")
         }
+
+    private fun httpGet(url: String): String = openHttp(url).run {
+        try {
+            val code = responseCode
+            if (code !in 200..299) error("HTTP $code (${URI(url).host})")
+            inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        } finally { disconnect() }
+    }
 
     private fun fetchBytes(url: String): ByteArray {
         var last: Exception? = null
         repeat(3) {
             try {
-                return http.newCall(buildReq(url)).execute().use { r ->
-                    if (!r.isSuccessful) error("HTTP ${r.code} (${URI(url).host})")
-                    r.body!!.bytes()
+                return openHttp(url).run {
+                    try {
+                        val code = responseCode
+                        if (code !in 200..299) error("HTTP $code (${URI(url).host})")
+                        inputStream.use { it.readBytes() }
+                    } finally { disconnect() }
                 }
-            } catch (e: Exception) {
-                last = e
-            }
+            } catch (e: Exception) { last = e }
         }
         throw last!!
     }

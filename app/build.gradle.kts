@@ -38,7 +38,13 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 removes unreachable code and optimizes the remaining bytecode.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             // Подписываем, только если ключ настроен
             if (signingValue("storeFile", "KEYSTORE_FILE") != null) {
                 signingConfig = signingConfigs.getByName("release")
@@ -54,9 +60,6 @@ android {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+    // Coroutines are used for concurrent HLS segment downloads and background work.
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
