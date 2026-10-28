@@ -34,8 +34,10 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.net.URI
 import java.nio.ByteBuffer
@@ -93,7 +95,7 @@ class MainActivity : AppCompatActivity() {
             minLines = 2
         }
         button = Button(this).apply {
-            text = "Найти варианты"
+            text = "Найти mp4 / варианты"
             setOnClickListener { search() }
         }
         progress = ProgressBar(this).apply { visibility = View.GONE }
@@ -197,8 +199,14 @@ class MainActivity : AppCompatActivity() {
             }
             setBusy(false)
             result.onSuccess { options ->
-                status.text = "Найдено вариантов: ${options.size}"
-                showOptions(options)
+                val direct = options.count { !it.isHls }
+                val hls = options.size - direct
+                status.text = "Найдено: $direct прямых mp4 (стандартный плеер) + $hls HLS"
+                if (options.isEmpty()) {
+                    status.text = "Варианты не найдены"
+                } else {
+                    showOptions(options)
+                }
             }.onFailure {
                 status.text = if (it is IllegalStateException) "Ошибка: ${it.message}"
                 else "Ошибка: ${describe(it)}"
@@ -255,18 +263,34 @@ class MainActivity : AppCompatActivity() {
             RegexOption.IGNORE_CASE)
             .find(body)?.value?.trim()?.let { " — «$it»" }.orEmpty()
 
-    /** Пробует несколько страниц VK по очереди, пока не найдёт хотя бы один вариант. */
+    /**
+     * Главный источник прямых mp4 — AJAX al_video.php (как у yt-dlp).
+     * В HTML video_ext.php VK часто больше не кладёт url720/cache720.
+     */
     private fun fetchOptions(oid: String, id: String, hash: String): List<VideoOption> {
+        val log = StringBuilder()
+        val vid = "${oid}_$id"
+
+        // 1) Основной способ: POST https://vk.com/al_video.php
+        try {
+            val opts = fetchViaAlVideo(oid, id, hash)
+            log.appendLine("• al_video.php: вариантов ${opts.size}")
+            if (opts.isNotEmpty()) return opts
+        } catch (e: Exception) {
+            log.appendLine("• al_video.php: ${e.message}")
+        }
+
+        // 2) Запасной: страницы плеера (старый способ)
         val q = "oid=$oid&id=$id" + if (hash.isNotEmpty()) "&hash=$hash" else ""
         val pages = listOf(
             "https://vk.com/video_ext.php?$q",
             "https://vkvideo.ru/video_ext.php?$q",
-            "https://vkvideo.ru/video${oid}_$id",
-            "https://m.vk.com/video${oid}_$id"
+            "https://vkvideo.ru/video$vid",
+            "https://m.vk.com/video$vid",
+            "https://vk.com/video$vid"
         )
-        val log = StringBuilder()
         for (u in pages) {
-            val label = URI(u).host + URI(u).path
+            val label = runCatching { URI(u).host + URI(u).path }.getOrDefault(u)
             try {
                 val (code, body) = httpFetch(u)
                 val opts = if (code in 200..299) extractOptions(body) else emptyList()
@@ -281,27 +305,128 @@ class MainActivity : AppCompatActivity() {
             "только по hash/после входа, либо внешним (YouTube и т.п.).\n\nПопытки:\n$log")
     }
 
-    /** Достаёт mp4 и HLS из страницы плеера (JSON-параметры или теги <source>). */
+    /**
+     * POST al_video.php?act=show — отсюда VK отдаёт player.params с url240/url360/.../cache1080.
+     * Это те самые прямые mp4 для стандартного плеера.
+     */
+    private fun fetchViaAlVideo(oid: String, id: String, hash: String): List<VideoOption> {
+        val video = "${oid}_$id"
+        val form = mutableMapOf(
+            "act" to "show",
+            "al" to "1",
+            "video" to video
+        )
+        if (hash.isNotEmpty()) form["hash"] = hash
+
+        val body = form.entries.joinToString("&") { (k, v) ->
+            "${java.net.URLEncoder.encode(k, "UTF-8")}=${java.net.URLEncoder.encode(v, "UTF-8")}"
+        }
+
+        val mediaType = "application/x-www-form-urlencoded; charset=UTF-8".toMediaType()
+        val req = Request.Builder()
+            .url("https://vk.com/al_video.php")
+            .post(body.toRequestBody(mediaType))
+            .header("User-Agent", UA)
+            .header("Referer", "https://vk.com/video$video")
+            .header("Origin", "https://vk.com")
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header("Accept", "*/*")
+            .header("Accept-Language", "ru,en;q=0.8")
+            .build()
+
+        val json = http.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) error("HTTP ${resp.code}")
+            resp.body?.string().orEmpty()
+        }
+        if (json.isBlank()) error("пустой ответ")
+
+        // Ответ: {"payload":[code, html, ..., {player:..., mvData:...}]}
+        // или просто большой JSON/HTML с playerParams
+        return extractOptions(json)
+    }
+
+    /**
+     * Достаёт варианты с страницы плеера.
+     * Приоритет — прямые mp4-ссылки, которые VK собирает специально под обычные
+     * плееры (url240/url360/.../url2160 и *.240.mp4 … *.2160.mp4). Это самый
+     * надёжный способ: файл уже готов, качается системным DownloadManager в фоне.
+     */
     private fun extractOptions(raw: String): List<VideoOption> {
-        val clean = raw.replace("\\/", "/").replace("\\u002F", "/")
-            .replace("\\u0026", "&").replace("&amp;", "&")
+        // Нормализация экранирования, которое VK любит в JSON/JS
+        val clean = raw
+            .replace("\\/", "/")
+            .replace("\\u002F", "/")
+            .replace("\\u0026", "&")
+            .replace("&amp;", "&")
+            .replace("\\u003d", "=")
+            .replace("\\u003A", ":")
+            .replace("\\u003a", ":")
+            .replace("\\\"", "\"")
+            .replace("\\x2F", "/")
+            .replace("\\x2f", "/")
 
-        val byKey = Regex(""""url(\d{3,4})"\s*:\s*"(https?://[^"]+)"""").findAll(clean)
-            .map { it.groupValues[1].toInt() to it.groupValues[2] }
-        val byName = Regex("""https?://[^"'\s<>\\]+?\.(\d{3,4})\.mp4[^"'\s<>\\]*""").findAll(clean)
-            .map { it.groupValues[1].toInt() to it.value }
+        val found = mutableListOf<Pair<Int, String>>()
 
-        val mp4 = (byKey + byName)
+        // 1) Главное: "url720":"https://vkvd...okcdn.ru/?expires=..."
+        //    Сейчас VK отдаёт прямые файлы БЕЗ .mp4 в URL — это нормально.
+        //    Ключи urlNNN / cacheNNN — именно то, что использует стандартный плеер.
+        Regex(""""(?:url|cache)_?(\d{3,4})"\s*:\s*"(https?:[^"]+)"""")
+            .findAll(clean)
+            .forEach { found += it.groupValues[1].toInt() to it.groupValues[2] }
+
+        // 2) Без кавычек у ключа: url720: "https://..."
+        Regex("""(?:^|[,{\s])(?:url|cache)(\d{3,4})\s*:\s*"(https?:[^"]+)"""")
+            .findAll(clean)
+            .forEach { found += it.groupValues[1].toInt() to it.groupValues[2] }
+
+        // 3) Старый формат с .mp4 в пути (ещё встречается)
+        Regex("""https?://[^\s"'<>\\]+?(?:[./_](\d{3,4})\.mp4|\.(\d{3,4})\.mp4)[^\s"'<>\\]*""")
+            .findAll(clean)
+            .forEach { m ->
+                val h = (m.groupValues[1].ifEmpty { m.groupValues[2] }).toIntOrNull() ?: return@forEach
+                found += h to m.value
+            }
+
+        // 4) postlive_mp4 / live_mp4 / extra_data
+        Regex(""""(?:postlive_mp4|live_mp4|extra_data)"\s*:\s*"(https?:[^"]+)"""")
+            .findAll(clean)
+            .forEach { m ->
+                val u = m.groupValues[1]
+                val h = Regex("""[./_](\d{3,4})\.mp4""").find(u)?.groupValues?.get(1)?.toIntOrNull() ?: 720
+                found += h to u
+            }
+
+        // Нормализация и отсев HLS/DASH/мусора
+        val mp4 = found
+            .map { (h, u) ->
+                h to u.replace("\\/", "/")
+                    .replace("\\u002F", "/")
+                    .replace("\\u0026", "&")
+                    .replace("&amp;", "&")
+            }
+            .filter { (h, u) ->
+                h in 144..4320 &&
+                    (u.startsWith("http://") || u.startsWith("https://") || u.startsWith("//")) &&
+                    !u.contains(".m3u8", ignoreCase = true) &&
+                    !u.contains("manifest", ignoreCase = true) &&
+                    !u.contains(".mpd", ignoreCase = true) &&
+                    !u.contains("mediascope", ignoreCase = true) &&
+                    !u.contains("getVideoPreview", ignoreCase = true)
+            }
+            .map { (h, u) -> h to if (u.startsWith("//")) "https:$u" else u }
             .distinctBy { it.first }
             .sortedByDescending { it.first }
-            .map { (h, u) -> VideoOption("${h}p — mp4 (прямая ссылка)", h, u, false) }
-            .toList()
+            .map { (h, u) ->
+                VideoOption("${h}p — mp4 (прямая ссылка) ★", h, u, false)
+            }
 
+        // HLS — запасной вариант (требует открытого приложения)
         val hlsUrl = Regex(""""hls(?:_ondemand)?"\s*:\s*"(https?://[^"]+)"""")
             .find(clean)?.groupValues?.get(1)
         val hls = if (hlsUrl != null) runCatching { parseHls(hlsUrl) }.getOrDefault(emptyList())
         else emptyList()
 
+        // Прямые mp4 всегда сверху
         return mp4 + hls
     }
 
@@ -341,28 +466,63 @@ class MainActivity : AppCompatActivity() {
     private fun resolve(base: String, ref: String): String = URI(base).resolve(ref).toString()
 
     private fun showOptions(options: List<VideoOption>) {
+        val direct = options.filter { !it.isHls }
+        val hls = options.filter { it.isHls }
+        // Прямые mp4 (стандартный плеер) всегда первыми и с пометкой
+        val ordered = direct + hls
+        val labels = ordered.map { opt ->
+            if (!opt.isHls) opt.label
+            else "${opt.label}  (фон)"
+        }.toTypedArray()
+
         AlertDialog.Builder(this)
-            .setTitle("Выберите вариант")
-            .setItems(options.map { it.label }.toTypedArray()) { _, which ->
-                val opt = options[which]
+            .setTitle(
+                if (direct.isNotEmpty())
+                    "Выберите вариант (★ = прямая mp4, оба в фоне)"
+                else
+                    "Выберите вариант (HLS → фон)"
+            )
+            .setItems(labels) { _, which ->
+                val opt = ordered[which]
                 if (opt.isHls) downloadHls(opt) else downloadMp4(opt)
             }
             .setNegativeButton("Отмена", null)
             .show()
     }
 
-    // ---------- mp4: системный DownloadManager ----------
+    // ---------- mp4: системный DownloadManager (полностью в фоне) ----------
 
     private fun downloadMp4(opt: VideoOption) {
         val fileName = "vk_${videoId}_${opt.height}p.mp4"
         val req = DownloadManager.Request(Uri.parse(opt.url))
-            .setTitle(fileName)
+            .setTitle("VK · $fileName")
+            .setDescription("Прямая ссылка ${opt.height}p — стандартный плеер")
             .addRequestHeader("User-Agent", UA)
             .addRequestHeader("Referer", "https://vk.com/")
+            .addRequestHeader("Origin", "https://vk.com")
+            // Видимое уведомление + уведомление о завершении
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            // Разрешаем загрузку и по мобильной сети, и в роуминге
+            .setAllowedOverMetered(true)
+            .setAllowedOverRoaming(true)
+            // Android сам продолжит после перезагрузки / потери сети
+            .setRequiresCharging(false)
+            .setRequiresDeviceIdle(false)
             .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-        (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(req)
-        Toast.makeText(this, "Скачивание началось: $fileName", Toast.LENGTH_LONG).show()
+
+        val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        val id = dm.enqueue(req)
+
+        status.text = "Фоновая загрузка запущена\n" +
+            "Файл: $fileName\n" +
+            "ID: $id\n" +
+            "Можно свернуть или закрыть приложение — скачивание продолжится.\n" +
+            "Готовый файл появится в «Загрузки»."
+        Toast.makeText(
+            this,
+            "Фоновая загрузка: $fileName\nМожно закрыть приложение",
+            Toast.LENGTH_LONG
+        ).show()
     }
 
     // ---------- HLS: свой загрузчик сегментов + (по возможности) ремукс в mp4 ----------
@@ -405,72 +565,25 @@ class MainActivity : AppCompatActivity() {
 
     private fun mimeFor(f: File) = if (f.extension == "mp4") "video/mp4" else "video/mp2t"
 
+    /** HLS → фоновый Foreground Service (можно свернуть/закрыть приложение). */
     private fun downloadHls(opt: VideoOption) {
-        val base = "vk_${videoId}_${if (opt.height > 0) "${opt.height}p" else "hls"}"
-        setBusy(true)
-        status.text = "Скачивание (видео): 0%\nНе закрывайте приложение до конца."
-
-        lifecycleScope.launch {
-            val result = runCatching {
-                val video = withContext(Dispatchers.IO) {
-                    downloadHlsSegments(opt.url, "${base}_video", progressCb("видео"))
-                }
-                val audio = opt.audioUrl?.let { au ->
-                    withContext(Dispatchers.IO) {
-                        downloadHlsSegments(au, "${base}_audio", progressCb("аудио"))
-                    }
-                }
-
-                run {
-                    status.text = "Конвертация в mp4: 0%"
-                    val mp4 = File(cacheDir, "$base.mp4").also { it.delete() }
-                    val t0 = SystemClock.elapsedRealtime()
-                    val mux = runCatching {
-                        withContext(Dispatchers.IO) {
-                            muxToMp4(listOfNotNull(video, audio), mp4) { p ->
-                                ui.post { status.text = "Конвертация в mp4: $p%${etaText(t0, p)}" }
-                            }
-                        }
-                    }
-                    if (mux.isSuccess) {
-                        status.text = "Проверка и сохранение…"
-                        val check = withContext(Dispatchers.IO) {
-                            val c = checkMp4(mp4)
-                            saveToDownloads(mp4, mp4.name, "video/mp4")
-                            video.delete()
-                            audio?.delete()
-                            c
-                        }
-                        "Готово: ${mp4.name} сохранён в «Загрузки»\n$check"
-                    } else {
-                        mp4.delete()
-                        status.text = "Сохранение в «Загрузки»…"
-                        val saved = withContext(Dispatchers.IO) {
-                            val names = mutableListOf<String>()
-                            val vName = if (audio == null) "$base.${video.extension}"
-                            else "${base}_video.${video.extension}"
-                            saveToDownloads(video, vName, mimeFor(video))
-                            names += vName
-                            audio?.let { a ->
-                                val aName = "${base}_audio.${a.extension}"
-                                saveToDownloads(a, aName, mimeFor(a))
-                                names += aName
-                            }
-                            names
-                        }
-                        "Конвертация в mp4 не удалась, исходные файлы сохранены в «Загрузки»: " +
-                            saved.joinToString() + "\n" +
-                            (if (audio != null) "Видео и звук лежат отдельно.\n" else "") +
-                            "Причина:\n${describe(mux.exceptionOrNull()!!)}"
-                    }
-                }
-            }
-            setBusy(false)
-            status.text = result.fold(
-                onSuccess = { it },
-                onFailure = { "Ошибка: ${describe(it)}" }
-            )
-        }
+        val label = if (opt.height > 0) "${opt.height}p" else "hls"
+        HlsDownloadService.start(
+            ctx = this,
+            url = opt.url,
+            audioUrl = opt.audioUrl,
+            height = opt.height,
+            videoId = videoId
+        )
+        status.text = "Фоновая HLS-загрузка запущена ($label)\n" +
+            "Прогресс — в уведомлении.\n" +
+            "Можно свернуть или закрыть приложение.\n" +
+            "Готовый файл появится в «Загрузки»."
+        Toast.makeText(
+            this,
+            "HLS в фоне ($label)\nСмотрите уведомление",
+            Toast.LENGTH_LONG
+        ).show()
     }
 
     private fun attr(line: String, name: String): String? =
