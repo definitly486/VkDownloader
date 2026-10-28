@@ -84,6 +84,7 @@ class MainActivity : Activity() {
 
     private lateinit var input: EditText
     private lateinit var button: Button
+    private lateinit var cancelDownloadButton: Button
     private lateinit var progress: ProgressBar
     private lateinit var downloadProgress: ProgressBar
     private lateinit var status: TextView
@@ -113,6 +114,17 @@ class MainActivity : Activity() {
             text = "Найти mp4 / варианты"
             setOnClickListener { search() }
         }
+        cancelDownloadButton = Button(this).apply {
+            text = "Прервать скачивание"
+            visibility = View.GONE
+            setOnClickListener {
+                val cancel = Intent(this@MainActivity, Mp4DownloadService::class.java).setAction(Mp4DownloadService.ACTION_CANCEL)
+                if (Build.VERSION.SDK_INT >= 26) startForegroundService(cancel) else startService(cancel)
+                status.text = "Отправлена команда прерывания загрузки."
+                cancelDownloadButton.visibility = View.GONE
+                downloadProgress.visibility = View.GONE
+            }
+        }
         progress = ProgressBar(this).apply { visibility = View.GONE }
         downloadProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
@@ -125,6 +137,7 @@ class MainActivity : Activity() {
         root.addView(input)
         root.addView(button)
         root.addView(progress)
+        root.addView(cancelDownloadButton)
         root.addView(downloadProgress)
         root.addView(status)
         setContentView(root)
@@ -544,33 +557,12 @@ class MainActivity : Activity() {
         val fileName = "vk_${videoId}_${opt.height}p.mp4"
         downloadProgress.visibility = View.VISIBLE
         downloadProgress.isIndeterminate = true
-        status.text = "Проверка поддержки ускоренной загрузки…\nЕсли сервер не поддерживает HTTP Range, будет использован системный загрузчик."
-        activityScope.launch {
-            try {
-                val total = withContext(Dispatchers.IO) { probeRangeSupport(opt.url) }
-                if (total == null || total < 2L * 1024L * 1024L) {
-                    // Для неподдерживаемого Range и небольших файлов оставляем надёжный системный DownloadManager.
-                    enqueueMp4WithDownloadManager(opt, fileName, if (total == null) "Сервер не поддерживает HTTP Range" else "Файл небольшой")
-                    return@launch
-                }
-                activeDownloadId = -2L // собственная загрузка; не является DownloadManager ID
-                downloadProgress.isIndeterminate = false
-                downloadProgress.progress = 0
-                status.text = "Ускоренная загрузка: $fileName\nHTTP Range подтверждён; используется до 4 соединений."
-                postRangeNotification(fileName, 0, total, 0L, ongoing = true)
-                withContext(Dispatchers.IO) { downloadMp4Ranges(opt.url, fileName, total) }
-                downloadProgress.progress = 100
-                status.text = "Загрузка завершена: $fileName\n${formatBytes(total)}\nСохранено в папку «Загрузки». Использовалось до 4 соединений."
-                postRangeNotification(fileName, 100, total, 0L, ongoing = false, completed = true)
-                activeDownloadId = -1L
-            } catch (e: Exception) {
-                activeDownloadId = -1L
-                (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(RANGE_NOTIFICATION_ID)
-                downloadProgress.visibility = View.GONE
-                status.text = "Ошибка ускоренной загрузки: ${e.message ?: e.javaClass.simpleName}\nПроверьте сеть и повторите попытку. Системный загрузчик не запускался автоматически, чтобы не скачивать файл повторно."
-                Log.e("VkDownloader", "Range MP4 download failed", e)
-            }
-        }
+        status.text = "Запуск фоновой загрузки…"
+        Mp4DownloadService.start(this, opt.url, fileName)
+        cancelDownloadButton.visibility = View.VISIBLE
+        activeDownloadId = -3L
+        downloadProgress.isIndeterminate = false
+        status.text = "Загрузка выполняется в фоне. Уведомление покажет скорость и прогресс."
     }
 
     private fun createRangeNotificationChannel() {

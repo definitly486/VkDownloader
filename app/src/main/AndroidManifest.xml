@@ -33,6 +33,11 @@
         </activity>
 
         <service
+            android:name=".Mp4DownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <service
             android:name=".HlsDownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
