@@ -15,6 +15,18 @@ android {
         resourceConfigurations += listOf("ru", "en")
     }
 
+ signingConfigs {
+        create("release") {
+            val storePath = signingValue("storeFile", "KEYSTORE_FILE")
+            if (storePath != null) {
+                storeFile = rootProject.file(storePath)
+                storePassword = signingValue("storePassword", "KEYSTORE_PASSWORD")
+                keyAlias = signingValue("keyAlias", "KEY_ALIAS")
+                keyPassword = signingValue("keyPassword", "KEY_PASSWORD")
+            }
+        }
+
+
     buildTypes {
         release {
             isMinifyEnabled = true
