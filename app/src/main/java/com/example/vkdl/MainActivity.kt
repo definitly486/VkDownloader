@@ -90,6 +90,8 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
 
     private var videoId = "video"
+    /** Master m3u8 последнего найденного HLS (для «Смотреть live»). */
+    private var lastHlsMaster: String? = null
     private var activeDownloadId = -1L
     private var lastDownloadBytes = 0L
     private var lastDownloadSampleMs = 0L
@@ -489,11 +491,27 @@ class MainActivity : Activity() {
                 VideoOption("${h}p — mp4 (прямая ссылка) ★", h, u, false)
             }
 
-        // HLS — запасной вариант (в т.ч. live)
-        val hlsUrl = Regex(""""(?:hls(?:_ondemand|_live)?|live_hls)"\s*:\s*"(https?://[^"]+)"""")
-            .find(clean)?.groupValues?.get(1)
-        val hls = if (hlsUrl != null) runCatching { parseHls(hlsUrl) }.getOrDefault(emptyList())
-        else emptyList()
+        // HLS — запасной вариант (в т.ч. live). Берём все подходящие URL, первый = master.
+        val hlsCandidates = Regex(""""(?:hls(?:_ondemand|_live|_src)?|live_hls|manifest)"\s*:\s*"(https?://[^"]+\.m3u8[^"]*)"""")
+            .findAll(clean)
+            .map { it.groupValues[1] }
+            .distinct()
+            .toList()
+        // fallback без требования .m3u8 в строке
+        val hlsUrl = hlsCandidates.firstOrNull()
+            ?: Regex(""""(?:hls(?:_ondemand|_live)?|live_hls)"\s*:\s*"(https?://[^"]+)"""")
+                .find(clean)?.groupValues?.get(1)
+
+        val hls = if (hlsUrl != null) {
+            lastHlsMaster = hlsUrl
+            val parsed = runCatching { parseHls(hlsUrl) }.getOrDefault(emptyList())
+            // если разобрали качества — ок; иначе одна кнопка на master
+            if (parsed.isNotEmpty()) parsed
+            else listOf(VideoOption("HLS live → mp4", 0, hlsUrl, true))
+        } else {
+            lastHlsMaster = null
+            emptyList()
+        }
 
         // Прямые mp4 всегда сверху
         return mp4 + hls
@@ -507,16 +525,20 @@ class MainActivity : Activity() {
         }
         val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
 
-        // GROUP-ID -> URI отдельной аудио-дорожки
+        // GROUP-ID -> URI отдельной аудио-дорожки (live часто без DEFAULT=YES)
         val audioGroups = HashMap<String, String>()
         for (l in lines) {
             if (!l.startsWith("#EXT-X-MEDIA:") || attr(l, "TYPE") != "AUDIO") continue
             val uri = attr(l, "URI") ?: continue
             val gid = attr(l, "GROUP-ID") ?: continue
+            val resolved = resolve(masterUrl, uri)
+            // предпочитаем DEFAULT=YES, иначе первую попавшуюся в группе
             if (attr(l, "DEFAULT") == "YES" || gid !in audioGroups) {
-                audioGroups[gid] = resolve(masterUrl, uri)
+                audioGroups[gid] = resolved
             }
         }
+        // если AUDIO есть, но GROUP-ID не совпал со STREAM-INF — возьмём любую
+        val fallbackAudio = audioGroups.values.firstOrNull()
 
         val out = mutableListOf<VideoOption>()
         for (i in lines.indices) {
@@ -524,10 +546,14 @@ class MainActivity : Activity() {
             val uri = lines.getOrNull(i + 1)?.takeIf { !it.startsWith("#") } ?: continue
             val h = Regex("""RESOLUTION=\d+x(\d+)""").find(lines[i])
                 ?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            val audio = attr(lines[i], "AUDIO")?.let { audioGroups[it] }
+            val audio = attr(lines[i], "AUDIO")?.let { audioGroups[it] } ?: fallbackAudio
             val q = if (h > 0) "${h}p" else "HLS"
             val label = if (audio != null) "$q — HLS видео + аудио → mp4" else "$q — HLS → mp4"
             out += VideoOption(label, h, resolve(masterUrl, uri), true, audio)
+        }
+        // если качеств нет, но master валиден — одна опция
+        if (out.isEmpty()) {
+            out += VideoOption("HLS-поток → mp4", 0, masterUrl, true, fallbackAudio)
         }
         return out.distinctBy { it.height }.sortedByDescending { it.height }
     }
@@ -537,26 +563,137 @@ class MainActivity : Activity() {
     private fun showOptions(options: List<VideoOption>) {
         val direct = options.filter { !it.isHls }
         val hls = options.filter { it.isHls }
-        // Прямые mp4 (стандартный плеер) всегда первыми и с пометкой
-        val ordered = direct + hls
-        val labels = ordered.map { opt ->
-            if (!opt.isHls) opt.label
-            else "${opt.label}  (фон)"
-        }.toTypedArray()
+        // Прямые mp4 первыми; HLS — скачивание; сверху — просмотр live без скачивания
+        val playUrl = lastHlsMaster
+            ?: hls.firstOrNull()?.let { bestPlayUrl(it) }
+            ?: direct.firstOrNull()?.url
+
+        data class Row(val label: String, val action: () -> Unit)
+        val rows = mutableListOf<Row>()
+
+        if (playUrl != null && hls.isNotEmpty()) {
+            rows += Row("▶ Смотреть live (встроенный плеер)") {
+                playInApp(playUrl, isHls = true)
+            }
+            rows += Row("▶ Смотреть live — другое приложение") {
+                playStream(playUrl, isHls = true, forceChooser = true)
+            }
+        }
+        if (direct.isNotEmpty() && hls.isEmpty()) {
+            rows += Row("▶ Смотреть (встроенный плеер)") {
+                playInApp(direct.first().url, isHls = false)
+            }
+            rows += Row("▶ Смотреть — другое приложение") {
+                playStream(direct.first().url, isHls = false, forceChooser = true)
+            }
+        }
+
+        for (opt in direct) {
+            rows += Row("${opt.label}  — скачать") { downloadMp4(opt) }
+            rows += Row("▶ Смотреть ${opt.height}p (встроенный плеер)") {
+                playInApp(opt.url, isHls = false)
+            }
+        }
+        for (opt in hls) {
+            rows += Row("${opt.label}  — скачать (фон)") { downloadHls(opt) }
+            rows += Row("▶ Смотреть ${if (opt.height > 0) "${opt.height}p" else "HLS"} (встроенный плеер)") {
+                playInApp(bestPlayUrl(opt), isHls = true)
+            }
+        }
 
         AlertDialog.Builder(this)
             .setTitle(
-                if (direct.isNotEmpty())
-                    "Выберите вариант (★ = прямая mp4, оба в фоне)"
-                else
-                    "Выберите вариант (HLS → фон)"
+                when {
+                    hls.isNotEmpty() && direct.isNotEmpty() -> "Live / видео — смотреть или скачать"
+                    hls.isNotEmpty() -> "Live HLS — смотреть или скачать"
+                    else -> "Выберите вариант (★ = прямая mp4)"
+                }
             )
-            .setItems(labels) { _, which ->
-                val opt = ordered[which]
-                if (opt.isHls) downloadHls(opt) else downloadMp4(opt)
+            .setItems(rows.map { it.label }.toTypedArray()) { _, which ->
+                rows[which].action()
             }
             .setNegativeButton("Отмена", null)
             .show()
+    }
+
+    /** Для внешнего плеера предпочтителен master m3u8 — в нём и видео, и аудио. */
+    private fun bestPlayUrl(opt: VideoOption): String =
+        lastHlsMaster?.takeIf { it.isNotBlank() } ?: opt.url
+
+    /** Встроенный ExoPlayer: HLS/mp4 + Referer/UA как у скачивания (звук и live). */
+    private fun playInApp(url: String, isHls: Boolean) {
+        PlayerActivity.start(
+            ctx = this,
+            url = url,
+            title = "VK $videoId",
+            isHls = isHls
+        )
+        status.text = "Встроенный плеер\n$url"
+    }
+
+    /**
+     * Открыть поток без скачивания.
+     * forceChooser=false → стандартное (дефолтное) приложение системы.
+     * forceChooser=true  → диалог выбора приложения (VLC, MX Player…).
+     */
+    private fun playStream(url: String, isHls: Boolean, forceChooser: Boolean = false) {
+        val uri = Uri.parse(url)
+        val isM3u8 = isHls || url.contains(".m3u8", ignoreCase = true)
+        // Несколько MIME — системный плеер и сторонние по-разному реагируют на HLS
+        val mimes = if (isM3u8) {
+            listOf(
+                "application/x-mpegURL",
+                "application/vnd.apple.mpegurl",
+                "video/mp2t",
+                "video/*"
+            )
+        } else {
+            listOf("video/mp4", "video/*")
+        }
+
+        fun buildIntent(mime: String): Intent =
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mime)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                putExtra("title", "VK $videoId")
+            }
+
+        // 1) Стандартное приложение (без chooser)
+        if (!forceChooser) {
+            for (mime in mimes) {
+                val intent = buildIntent(mime)
+                if (intent.resolveActivity(packageManager) != null) {
+                    try {
+                        startActivity(intent)
+                        status.text = "Открыто в стандартном плеере\n$url"
+                        return
+                    } catch (_: Exception) {
+                        // пробуем следующий MIME
+                    }
+                }
+            }
+            // если дефолтный обработчик не нашёлся — уйдём в chooser
+        }
+
+        // 2) Выбор приложения
+        try {
+            val primary = buildIntent(mimes.first())
+            startActivity(Intent.createChooser(primary, "Открыть поток в…"))
+            status.text = "Выберите приложение для воспроизведения\n$url"
+        } catch (e: Exception) {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, uri))
+                status.text = "Открыта ссылка на поток"
+            } catch (e2: Exception) {
+                status.text = "Не удалось открыть плеер: ${e2.message}\nУстановите VLC или MX Player"
+                Toast.makeText(
+                    this,
+                    "Нужен плеер с поддержкой HLS (VLC)",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
     }
 
     // ---------- MP4: проверяем HTTP Range и используем максимум 3 потока только при поддержке сервером ----------

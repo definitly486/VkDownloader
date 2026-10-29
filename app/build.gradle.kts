@@ -62,4 +62,8 @@ android {
 dependencies {
     // Coroutines are used for concurrent HLS segment downloads and background work.
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // Встроенный плеер: HLS live + mp4 с заголовками Referer (системный плеер их не шлёт)
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
+    implementation("androidx.media3:media3-ui:1.4.1")
 }
