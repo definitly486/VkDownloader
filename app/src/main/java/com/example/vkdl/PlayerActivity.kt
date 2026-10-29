@@ -3,13 +3,19 @@ package com.example.vkdl
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.media.AudioManager
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -18,6 +24,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
@@ -31,7 +38,9 @@ import kotlin.math.abs
  *
  * Громкость: вертикальный свайп по **правой** половине экрана.
  * Яркость: вертикальный свайп по **левой** половине экрана.
+ * Fullscreen: immersive + кнопка; двойной тап по центру тоже переключает.
  */
+@UnstableApi
 class PlayerActivity : Activity() {
 
     companion object {
@@ -59,7 +68,10 @@ class PlayerActivity : Activity() {
     private lateinit var overlayText: TextView
     private lateinit var overlayBar: ProgressBar
     private lateinit var overlayBox: FrameLayout
+    private lateinit var fsButton: ImageButton
+    private lateinit var playerView: PlayerView
 
+    private var isFullscreen = true
     private var touchStartX = 0f
     private var touchStartY = 0f
     private var gestureActive = false
@@ -67,11 +79,14 @@ class PlayerActivity : Activity() {
     private var startVolume = 0
     private var maxVolume = 1
     private var startBrightness = 0.5f
+    private var lastTapMs = 0L
     private val touchSlopPx by lazy { 16f * resources.displayMetrics.density }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // сразу на весь экран
+        enterFullscreen()
 
         val url = intent.getStringExtra(EXTRA_URL).orEmpty()
         val title = intent.getStringExtra(EXTRA_TITLE) ?: "VK Video"
@@ -87,7 +102,7 @@ class PlayerActivity : Activity() {
         maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
 
         val density = resources.displayMetrics.density
-        val playerView = PlayerView(this).apply {
+        playerView = PlayerView(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -95,6 +110,8 @@ class PlayerActivity : Activity() {
             useController = true
             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
             setBackgroundColor(0xFF000000.toInt())
+            // растянуть видео на весь экран (с обрезкой краёв при необходимости)
+            resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
         }
 
         overlayText = TextView(this).apply {
@@ -117,7 +134,7 @@ class PlayerActivity : Activity() {
             )
         }
         overlayBox = FrameLayout(this).apply {
-            visibility = android.view.View.GONE
+            visibility = View.GONE
             setBackgroundColor(0xCC222222.toInt())
             val pad = (14 * density).toInt()
             setPadding(pad, pad, pad, pad)
@@ -135,10 +152,26 @@ class PlayerActivity : Activity() {
             )
         }
 
+        // кнопка fullscreen (правый верхний угол)
+        val btnSize = (48 * density).toInt()
+        fsButton = ImageButton(this).apply {
+            setImageResource(android.R.drawable.ic_menu_crop)
+            setBackgroundColor(0x66000000)
+            setColorFilter(0xFFFFFFFF.toInt())
+            contentDescription = "Fullscreen"
+            layoutParams = FrameLayout.LayoutParams(btnSize, btnSize).apply {
+                gravity = Gravity.TOP or Gravity.END
+                topMargin = (12 * density).toInt()
+                marginEnd = (12 * density).toInt()
+            }
+            setOnClickListener { toggleFullscreen() }
+        }
+
         val root = FrameLayout(this).apply {
             setBackgroundColor(0xFF000000.toInt())
             addView(playerView)
             addView(overlayBox)
+            addView(fsButton)
         }
         setContentView(root)
         this.title = title
@@ -195,9 +228,67 @@ class PlayerActivity : Activity() {
         })
     }
 
+    private fun toggleFullscreen() {
+        if (isFullscreen) exitFullscreen() else enterFullscreen()
+    }
+
+    private fun enterFullscreen() {
+        isFullscreen = true
+        // скрыть status/navigation bar
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false)
+            window.insetsController?.let { c ->
+                c.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                c.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility =
+                (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    or View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
+        }
+        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        // удобнее смотреть live в ландшафте
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        if (::playerView.isInitialized) {
+            playerView.resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+        }
+        if (::fsButton.isInitialized) {
+            fsButton.setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
+        }
+    }
+
+    private fun exitFullscreen() {
+        isFullscreen = false
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(true)
+            window.insetsController?.show(
+                WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars()
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        }
+        window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        if (::fsButton.isInitialized) {
+            fsButton.setImageResource(android.R.drawable.ic_menu_crop)
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && isFullscreen) enterFullscreen()
+    }
+
     /**
      * Перехват на уровне Activity — PlayerView не «съедает» вертикальный свайп.
-     * Тапы и горизонтальные жесты уходят в контроллер ExoPlayer как обычно.
+     * Двойной тап по центру — toggle fullscreen.
      */
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
         val w = resources.displayMetrics.widthPixels
@@ -210,6 +301,21 @@ class PlayerActivity : Activity() {
                 startVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
                 val lp = window.attributes
                 startBrightness = if (lp.screenBrightness < 0f) 0.5f else lp.screenBrightness
+
+                // double-tap center → fullscreen
+                val now = System.currentTimeMillis()
+                val cx = w / 2f
+                val cy = resources.displayMetrics.heightPixels / 2f
+                if (abs(ev.x - cx) < w * 0.25f && abs(ev.y - cy) < cy * 0.35f) {
+                    if (now - lastTapMs < 300) {
+                        toggleFullscreen()
+                        lastTapMs = 0L
+                        return true
+                    }
+                    lastTapMs = now
+                } else {
+                    lastTapMs = 0L
+                }
             }
             MotionEvent.ACTION_MOVE -> {
                 val dx = ev.x - touchStartX
@@ -217,7 +323,7 @@ class PlayerActivity : Activity() {
                 if (!gestureActive) {
                     if (abs(dy) > touchSlopPx && abs(dy) > abs(dx) * 1.5f) {
                         gestureActive = true
-                        overlayBox.visibility = android.view.View.VISIBLE
+                        overlayBox.visibility = View.VISIBLE
                     }
                 }
                 if (gestureActive) {
@@ -227,7 +333,7 @@ class PlayerActivity : Activity() {
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 if (gestureActive) {
-                    overlayBox.visibility = android.view.View.GONE
+                    overlayBox.visibility = View.GONE
                     gestureActive = false
                     return true
                 }
@@ -238,7 +344,7 @@ class PlayerActivity : Activity() {
 
     private fun applyGesture(dy: Float) {
         val h = resources.displayMetrics.heightPixels.coerceAtLeast(1)
-        val delta = -dy / (h * 0.6f) // ~60% высоты экрана = полный диапазон
+        val delta = -dy / (h * 0.6f)
         if (gestureIsVolume) {
             val newVol = (startVolume + delta * maxVolume).toInt().coerceIn(0, maxVolume)
             audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVol, 0)
@@ -274,8 +380,12 @@ class PlayerActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        player?.release()
-        player = null
-        super.onBackPressed()
+        if (isFullscreen) {
+            exitFullscreen()
+        } else {
+            player?.release()
+            player = null
+            super.onBackPressed()
+        }
     }
 }
