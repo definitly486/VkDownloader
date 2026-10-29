@@ -1,3 +1,10 @@
+fun signingValue(propertyName: String, envName: String): String {
+    return providers.gradleProperty(propertyName).orNull
+        ?: System.getenv(envName)
+        ?: ""
+}
+
+
 plugins {
     id("com.android.application")
 }
