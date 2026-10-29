@@ -81,12 +81,11 @@ class PlayerActivity : Activity() {
     private var startBrightness = 0.5f
     private var lastTapMs = 0L
     private val touchSlopPx by lazy { 16f * resources.displayMetrics.density }
+    private val hideControlsRunnable = Runnable { hideChrome() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        // сразу на весь экран
-        enterFullscreen()
 
         val url = intent.getStringExtra(EXTRA_URL).orEmpty()
         val title = intent.getStringExtra(EXTRA_TITLE) ?: "VK Video"
@@ -110,7 +109,6 @@ class PlayerActivity : Activity() {
             useController = true
             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
             setBackgroundColor(0xFF000000.toInt())
-            // растянуть видео на весь экран (с обрезкой краёв при необходимости)
             resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
         }
 
@@ -152,13 +150,13 @@ class PlayerActivity : Activity() {
             )
         }
 
-        // кнопка fullscreen (правый верхний угол)
         val btnSize = (48 * density).toInt()
         fsButton = ImageButton(this).apply {
-            setImageResource(android.R.drawable.ic_menu_crop)
+            setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
             setBackgroundColor(0x66000000)
             setColorFilter(0xFFFFFFFF.toInt())
             contentDescription = "Fullscreen"
+            visibility = View.GONE  // только после тапа по экрану
             layoutParams = FrameLayout.LayoutParams(btnSize, btnSize).apply {
                 gravity = Gravity.TOP or Gravity.END
                 topMargin = (12 * density).toInt()
@@ -175,6 +173,9 @@ class PlayerActivity : Activity() {
         }
         setContentView(root)
         this.title = title
+
+        // Fullscreen только ПОСЛЕ setContentView — иначе insetsController == null
+        root.post { enterFullscreen() }
 
         val httpFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(UA)
@@ -228,33 +229,51 @@ class PlayerActivity : Activity() {
         })
     }
 
+    private fun showChrome() {
+        if (!::fsButton.isInitialized) return
+        fsButton.visibility = View.VISIBLE
+        // автоскрытие через 3 сек
+        fsButton.removeCallbacks(hideControlsRunnable)
+        fsButton.postDelayed(hideControlsRunnable, 3000L)
+    }
+
+    private fun hideChrome() {
+        if (::fsButton.isInitialized) fsButton.visibility = View.GONE
+    }
+
     private fun toggleFullscreen() {
         if (isFullscreen) exitFullscreen() else enterFullscreen()
     }
 
     private fun enterFullscreen() {
         isFullscreen = true
-        // скрыть status/navigation bar
-        if (Build.VERSION.SDK_INT >= 30) {
-            window.setDecorFitsSystemWindows(false)
-            window.insetsController?.let { c ->
-                c.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-                c.systemBarsBehavior =
-                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        try {
+            if (Build.VERSION.SDK_INT >= 30) {
+                window.setDecorFitsSystemWindows(false)
+                window.insetsController?.let { c ->
+                    c.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                    c.systemBarsBehavior =
+                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                window.decorView.systemUiVisibility =
+                    (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        or View.SYSTEM_UI_FLAG_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
             }
-        } else {
+            window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        } catch (_: Exception) {
+            // некоторые прошивки отдают null controller — не падаем
             @Suppress("DEPRECATION")
-            window.decorView.systemUiVisibility =
-                (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                    or View.SYSTEM_UI_FLAG_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
+            window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
         }
-        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-        // удобнее смотреть live в ландшафте
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        try {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        } catch (_: Exception) { /* ignore */ }
         if (::playerView.isInitialized) {
             playerView.resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
         }
@@ -265,17 +284,21 @@ class PlayerActivity : Activity() {
 
     private fun exitFullscreen() {
         isFullscreen = false
-        if (Build.VERSION.SDK_INT >= 30) {
-            window.setDecorFitsSystemWindows(true)
-            window.insetsController?.show(
-                WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars()
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
-        }
-        window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        try {
+            if (Build.VERSION.SDK_INT >= 30) {
+                window.setDecorFitsSystemWindows(true)
+                window.insetsController?.show(
+                    WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars()
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+            }
+            window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        } catch (_: Exception) { /* ignore */ }
+        try {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        } catch (_: Exception) { /* ignore */ }
         if (::fsButton.isInitialized) {
             fsButton.setImageResource(android.R.drawable.ic_menu_crop)
         }
@@ -283,13 +306,12 @@ class PlayerActivity : Activity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && isFullscreen) enterFullscreen()
+        if (hasFocus && isFullscreen) {
+            // отложенно — controller уже доступен
+            window.decorView.post { enterFullscreen() }
+        }
     }
 
-    /**
-     * Перехват на уровне Activity — PlayerView не «съедает» вертикальный свайп.
-     * Двойной тап по центру — toggle fullscreen.
-     */
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
         val w = resources.displayMetrics.widthPixels
         when (ev.actionMasked) {
@@ -302,7 +324,6 @@ class PlayerActivity : Activity() {
                 val lp = window.attributes
                 startBrightness = if (lp.screenBrightness < 0f) 0.5f else lp.screenBrightness
 
-                // double-tap center → fullscreen
                 val now = System.currentTimeMillis()
                 val cx = w / 2f
                 val cy = resources.displayMetrics.heightPixels / 2f
@@ -336,6 +357,14 @@ class PlayerActivity : Activity() {
                     overlayBox.visibility = View.GONE
                     gestureActive = false
                     return true
+                }
+                // простой тап (не свайп) — показать кнопку fullscreen на 3 сек
+                if (ev.actionMasked == MotionEvent.ACTION_UP) {
+                    val dx = abs(ev.x - touchStartX)
+                    val dy = abs(ev.y - touchStartY)
+                    if (dx < touchSlopPx && dy < touchSlopPx) {
+                        showChrome()
+                    }
                 }
             }
         }
@@ -373,6 +402,7 @@ class PlayerActivity : Activity() {
     }
 
     override fun onDestroy() {
+        if (::fsButton.isInitialized) fsButton.removeCallbacks(hideControlsRunnable)
         player?.release()
         player = null
         super.onDestroy()
