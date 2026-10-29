@@ -251,11 +251,12 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Понимает video-1_2, clip-1_2, ?z=video-1_2, video_ext.php?oid=..&id=..&hash=.. */
+    /** Понимает video-1_2, clip-1_2, live-1_2, ?z=video-1_2, video_ext.php?oid=..&id=..&hash=.. */
     private fun parseIds(text: String): Triple<String, String, String>? {
         Regex("""oid=(-?\d+)&(?:amp;)?id=(\d+)(?:&(?:amp;)?hash=([0-9a-fA-F]+))?""")
             .find(text)?.let { return Triple(it.groupValues[1], it.groupValues[2], it.groupValues[3]) }
-        Regex("""(?:video|clip)(-?\d+)_(\d+)(?:_([0-9a-fA-F]{6,}))?""")
+        // video / clip / live (включая vksport.vkvideo.ru/live-..., vkvideo.ru/live-...)
+        Regex("""(?:video|clip|live)(-?\d+)_(\d+)(?:_([0-9a-fA-F]{6,}))?""")
             .find(text)?.let { return Triple(it.groupValues[1], it.groupValues[2], it.groupValues[3]) }
         return null
     }
@@ -326,6 +327,7 @@ class MainActivity : Activity() {
     /**
      * Главный источник прямых mp4 — AJAX al_video.php (как у yt-dlp).
      * В HTML video_ext.php VK часто больше не кладёт url720/cache720.
+     * Добавлена поддержка live- и vksport.*.
      */
     private fun fetchOptions(oid: String, id: String, hash: String): List<VideoOption> {
         val log = StringBuilder()
@@ -346,8 +348,15 @@ class MainActivity : Activity() {
             "https://vk.com/video_ext.php?$q",
             "https://vkvideo.ru/video_ext.php?$q",
             "https://vkvideo.ru/video$vid",
+            "https://vkvideo.ru/live$vid",
+            "https://vksport.vkvideo.ru/video$vid",
+            "https://vksport.vkvideo.ru/live$vid",
+            "https://vksport.m.vkvideo.ru/video$vid",
+            "https://vksport.m.vkvideo.ru/live$vid",
             "https://m.vk.com/video$vid",
-            "https://vk.com/video$vid"
+            "https://m.vk.com/live$vid",
+            "https://vk.com/video$vid",
+            "https://vk.com/live$vid"
         )
         for (u in pages) {
             val label = runCatching { URI(u).host + URI(u).path }.getOrDefault(u)
@@ -447,8 +456,8 @@ class MainActivity : Activity() {
                 found += h to m.value
             }
 
-        // 4) postlive_mp4 / live_mp4 / extra_data
-        Regex(""""(?:postlive_mp4|live_mp4|extra_data)"\s*:\s*"(https?:[^"]+)"""")
+        // 4) postlive / live / extra_data / url_live
+        Regex(""""(?:postlive_mp4|live_mp4|extra_data|url_live)"\s*:\s*"(https?:[^"]+)"""")
             .findAll(clean)
             .forEach { m ->
                 val u = m.groupValues[1]
@@ -480,8 +489,8 @@ class MainActivity : Activity() {
                 VideoOption("${h}p — mp4 (прямая ссылка) ★", h, u, false)
             }
 
-        // HLS — запасной вариант (требует открытого приложения)
-        val hlsUrl = Regex(""""hls(?:_ondemand)?"\s*:\s*"(https?://[^"]+)"""")
+        // HLS — запасной вариант (в т.ч. live)
+        val hlsUrl = Regex(""""(?:hls(?:_ondemand|_live)?|live_hls)"\s*:\s*"(https?://[^"]+)"""")
             .find(clean)?.groupValues?.get(1)
         val hls = if (hlsUrl != null) runCatching { parseHls(hlsUrl) }.getOrDefault(emptyList())
         else emptyList()
