@@ -118,10 +118,10 @@ public final class LiveChannelsView extends LinearLayout {
                 String html = fetch(channel.url);
                 String image = findMeta(html, "og:image");
                 String name = findMeta(html, "og:title");
-                if (name != null) title.post(() -> title.setText(clean(name, channel.title)));
+                if (name != null) title.postToUi(() -> title.setText(clean(name, channel.title)));
                 if (image != null) {
                     Bitmap bitmap = fetchBitmap(image);
-                    if (bitmap != null) avatar.post(() -> avatar.setImageBitmap(bitmap));
+                    if (bitmap != null) avatar.postToUi(() -> avatar.setImageBitmap(bitmap));
                 }
             } catch (Exception ignored) { }
         });
@@ -154,7 +154,7 @@ public final class LiveChannelsView extends LinearLayout {
         executor.execute(() -> {
             try {
                 List<Video> videos = scanVideos(channel.url);
-                post(() -> {
+                postToUi(() -> {
                     if (content.getChildCount() < 2 || content.getChildAt(1) != status) return;
                     content.removeView(status);
                     if (videos.isEmpty()) {
@@ -174,7 +174,7 @@ public final class LiveChannelsView extends LinearLayout {
                     }
                 });
             } catch (Exception e) {
-                post(() -> status.setText("Ошибка загрузки канала: " + e.getMessage()));
+                postToUi(() -> status.setText("Ошибка загрузки канала: " + e.getMessage()));
             }
         });
     }
@@ -226,7 +226,7 @@ public final class LiveChannelsView extends LinearLayout {
 
         if (video.image != null) executor.execute(() -> {
             Bitmap bitmap = fetchBitmap(video.image);
-            if (bitmap != null) cover.post(() -> cover.setImageBitmap(bitmap));
+            if (bitmap != null) cover.postToUi(() -> cover.setImageBitmap(bitmap));
         });
         return tile;
     }
@@ -335,7 +335,7 @@ public final class LiveChannelsView extends LinearLayout {
         } catch (Exception ignored) { return null; }
     }
 
-    private void post(Runnable action) { if (getHandler() != null) getHandler().post(action); }
+    private void postToUi(Runnable action) { if (getHandler() != null) getHandler().post(action); }
 
     private static String clean(String value, String fallback) {
         if (value == null) return fallback;
