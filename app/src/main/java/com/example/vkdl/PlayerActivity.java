@@ -47,9 +47,6 @@ public class PlayerActivity extends Activity implements TextureView.SurfaceTextu
     private static final String EXTRA_URL = "url";
     private static final String EXTRA_TITLE = "title";
     private static final String EXTRA_IS_HLS = "is_hls";
-    private static final String UA =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    + "(KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
     public static void start(Context ctx, String url, String title, boolean isHls) {
         Intent i = new Intent(ctx, PlayerActivity.class);
@@ -115,11 +112,8 @@ public class PlayerActivity extends Activity implements TextureView.SurfaceTextu
         boolean isHls = getIntent().getBooleanExtra(EXTRA_IS_HLS,
                 url != null && url.contains(".m3u8"));
 
-        if (url == null || url.isEmpty()) {
-            Toast.makeText(this, "Нет URL потока", Toast.LENGTH_LONG).show();
-            finish();
-            return;
-        }
+        boolean hasNewPlayback = url != null && !url.isEmpty();
+        if (!hasNewPlayback) title = "VK Video";
 
         audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
         maxVolume = Math.max(1, audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC));
@@ -230,7 +224,7 @@ public class PlayerActivity extends Activity implements TextureView.SurfaceTextu
         root.post(this::enterFullscreen);
 
         /* PLAYBACK_SERVICE_CONNECT */
-        PlaybackService.startPlayback(this, url, title, isHls);
+        if (hasNewPlayback) PlaybackService.startPlayback(this, url, title, isHls);
         SessionToken token = new SessionToken(this,
                 new ComponentName(this, PlaybackService.class));
         controllerFuture = new MediaController.Builder(this, token).buildAsync();
@@ -251,11 +245,13 @@ public class PlayerActivity extends Activity implements TextureView.SurfaceTextu
                 });
                 if (surface != null) player.setVideoSurface(surface);
                 updatePlayerControls();
+                ui.removeCallbacks(updateProgress);
+                ui.post(updateProgress);
             } catch (Exception e) {
                 Toast.makeText(PlayerActivity.this, "Не удалось подключить плеер: " + e.getMessage(),
                         Toast.LENGTH_LONG).show();
             }
-        }, Runnable::run);
+        }, command -> ui.post(command));
         ui.post(updateProgress);
     }
 
@@ -264,74 +260,6 @@ public class PlayerActivity extends Activity implements TextureView.SurfaceTextu
         btnPlay.setImageResource(player.isPlaying()
                 ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play);
     }
-
-    /* OLD_PLAYER_SETUP_REMOVED */
-    /*
-        DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent(UA)
-                .setAllowCrossProtocolRedirects(true)
-                .setConnectTimeoutMs(15_000)
-                .setReadTimeoutMs(30_000)
-                .setDefaultRequestProperties(new java.util.HashMap<String, String>() {{
-                    put("Referer", "https://vk.com/");
-                    put("Origin", "https://vk.com");
-                    put("Accept", "*/*");
-                    put("Accept-Language", "ru,en;q=0.8");
-                }});
-
-        player = new ExoPlayer.Builder(this)
-                .setMediaSourceFactory(new DefaultMediaSourceFactory(http))
-                .build();
-
-        MediaItem.Builder mib = new MediaItem.Builder().setUri(url).setMediaId(title);
-        boolean hls = isHls || url.contains(".m3u8");
-        if (hls) mib.setMimeType(MimeTypes.APPLICATION_M3U8);
-        MediaItem mediaItem = mib.build();
-
-        MediaSource source;
-        if (hls) {
-            source = new HlsMediaSource.Factory(http).createMediaSource(mediaItem);
-        } else {
-            source = new ProgressiveMediaSource.Factory(http).createMediaSource(mediaItem);
-        }
-        player.setMediaSource(source);
-        player.prepare();
-        player.setPlayWhenReady(true);
-
-        player.addListener(new Player.Listener() {
-            @Override
-            public void onPlaybackStateChanged(int state) {
-                buffering.setVisibility(state == Player.STATE_BUFFERING ? View.VISIBLE : View.GONE);
-                if (state == Player.STATE_READY) {
-                    btnPlay.setImageResource(player.isPlaying()
-                            ? android.R.drawable.ic_media_pause
-                            : android.R.drawable.ic_media_play);
-                }
-            }
-
-            @Override
-            public void onIsPlayingChanged(boolean playing) {
-                btnPlay.setImageResource(playing
-                        ? android.R.drawable.ic_media_pause
-                        : android.R.drawable.ic_media_play);
-            }
-
-            @Override
-            public void onPlayerError(PlaybackException error) {
-                Toast.makeText(PlayerActivity.this,
-                        "Ошибка: " + error.getErrorCodeName() + "\n" + error.getMessage(),
-                        Toast.LENGTH_LONG).show();
-            }
-
-            @Override
-            public void onVideoSizeChanged(VideoSize videoSize) {
-                // TextureView letterbox handled by transform if needed
-            }
-        });
-
-        ui.post(updateProgress);
-    }
-    */
 
     private void togglePlay() {
         if (player == null) return;
