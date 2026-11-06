@@ -32,7 +32,8 @@ public final class LiveChannelsView extends LinearLayout {
             new Channel("@be_on_edge", "https://vkvideo.ru/@be_on_edge"),
             new Channel("@36nfl", "https://vkvideo.ru/@36nfl"),
             new Channel("@thedoubleplay", "https://vkvideo.ru/@thedoubleplay/lives"),
-            new Channel("@sportcast_nhl", "https://vkvideo.ru/@sportcast_nhl")
+            new Channel("@sportcast_nhl", "https://vkvideo.ru/@sportcast_nhl"),
+            new Channel("@36hockey", "https://vkvideo.ru/@36hockey")
     };
 
     private final ExecutorService executor = Executors.newFixedThreadPool(3);
