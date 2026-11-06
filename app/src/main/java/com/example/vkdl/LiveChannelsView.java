@@ -115,18 +115,6 @@ public final class LiveChannelsView extends LinearLayout {
         row.setOnClickListener(v -> loadChannel(channel));
         content.addView(row, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
-        executor.execute(() -> {
-            try {
-                String html = fetch(channel.url);
-                String image = findMeta(html, "og:image");
-                String name = findMeta(html, "og:title");
-                if (name != null) title.post(() -> title.setText(clean(name, channel.title)));
-                if (image != null) {
-                    Bitmap bitmap = fetchBitmap(image);
-                    if (bitmap != null) avatar.post(() -> avatar.setImageBitmap(bitmap));
-                }
-            } catch (Exception ignored) { }
-        });
     }
 
     private void loadChannel(Channel channel) {
@@ -161,8 +149,8 @@ public final class LiveChannelsView extends LinearLayout {
                     content.removeView(status);
                     if (videos.isEmpty()) {
                         TextView empty = new TextView(getContext());
-                        empty.setText("Не удалось найти публичные видео в HTML страницы. "
-                                + "Возможно, VK загружает список динамически или требует авторизацию.");
+                        empty.setText("VK Video не вернул публичные видео для этого канала. "
+                                + "Возможно, канал скрыт, требует авторизацию или поиск VK не нашёл его публикации.");
                         empty.setTextColor(Color.DKGRAY);
                         empty.setPadding(dp(12), dp(16), dp(12), dp(16));
                         content.addView(empty);
