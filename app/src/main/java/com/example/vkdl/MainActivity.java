@@ -149,7 +149,7 @@ public class MainActivity extends Activity {
         mainPage.addView(cancelDownloadButton);
         mainPage.addView(status);
 
-        LiveChannelsView livePage = new LiveChannelsView(this);
+        LiveChannelsView livePage = new LiveChannelsView(this, (videoUrl, videoTitle) -> {\n            input.setText(videoUrl);\n            videoTab.performClick();\n            search();\n        });
         livePage.setVisibility(View.GONE);
 
         tabs.addView(videoTab, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
