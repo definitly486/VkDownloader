@@ -235,8 +235,8 @@ public final class LiveChannelsView extends LinearLayout {
 
     private static final String VK_CLIENT_ID = "52461373";
     private static final String VK_API_VERSION = "5.282";
-    private static final int VK_PAGE_SIZE = 100;
-    private static final int VK_MAX_PAGES = 3;
+    private static final int VK_PAGE_SIZE = 30;
+    private static final int VK_MAX_PAGES = 4;
     private static final int VK_TIMEOUT_MS = 10000;
     private static String anonymousToken;
     private static long tokenExpiresAt;
