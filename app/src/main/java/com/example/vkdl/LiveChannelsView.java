@@ -231,96 +231,197 @@ public final class LiveChannelsView extends LinearLayout {
         return tile;
     }
 
-    private List<Video> scanVideos(String channelUrl) throws Exception {
-        String html = fetch(channelUrl);
-        String normalized = html.replace("\\/", "/").replace("\\u002F", "/")
-                .replace("&amp;", "&").replace("\\u0026", "&");
-        List<Video> result = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
+    private static final String VK_CLIENT_ID = "52461373";
+    private static final String VK_API_VERSION = "5.282";
+    private static final int VK_PAGE_SIZE = 100;
+    private static final int VK_MAX_PAGES = 3;
+    private static final int VK_TIMEOUT_MS = 10000;
+    private static String anonymousToken;
+    private static long tokenExpiresAt;
 
-        // Сначала берём ссылки именно на видео, чтобы не захватывать упоминания из текста.
-        Pattern anchors = Pattern.compile("<a\\b[^>]*href\\s*=\\s*[\"']([^\"']*(?:video|clip)-?\\d+_\\d+[^\"']*)[\"'][^>]*>(.*?)</a>",
-                Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-        Matcher a = anchors.matcher(normalized);
-        while (a.find()) {
-            String href = decode(a.group(1));
-            Matcher id = Pattern.compile("(?:video|clip)(-?\\d+_\\d+)").matcher(href);
-            if (!id.find()) continue;
-            addVideo(result, seen, normalized, id.group(1), a.group(2));
+    private List<Video> scanVideos(String channelUrl) throws Exception {
+        String screenName = extractScreenName(channelUrl);
+        JSONObject owner = callVkApi("utils.resolveScreenName",
+                "screen_name=" + android.net.Uri.encode(screenName));
+        JSONObject resolved = owner.optJSONObject("response");
+        if (resolved == null || resolved.optLong("object_id") == 0) {
+            throw new IllegalStateException("VK не смог определить владельца канала @" + screenName);
         }
 
-        // В некоторых ответах VK ссылки находятся в JSON, а не в HTML-якорях.
-        if (result.isEmpty()) {
-            Matcher ids = Pattern.compile("(?:video|clip)(-?\\d+_\\d+)").matcher(normalized);
-            while (ids.find()) addVideo(result, seen, normalized, ids.group(1), "");
+        long ownerId = resolved.optLong("object_id");
+        if ("group".equalsIgnoreCase(resolved.optString("type"))) ownerId = -ownerId;
+
+        List<Video> result = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (int page = 0; page < VK_MAX_PAGES; page++) {
+            String params = "owner_id=" + ownerId + "&count=" + VK_PAGE_SIZE
+                    + "&offset=" + (page * VK_PAGE_SIZE) + "&extended=1";
+            JSONObject root = callVkApi("video.get", params);
+            JSONObject response = root.optJSONObject("response");
+            org.json.JSONArray items = response == null ? null : response.optJSONArray("items");
+            if (items == null || items.length() == 0) break;
+
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject item = items.optJSONObject(i);
+                if (item == null) continue;
+                long videoOwner = item.optLong("owner_id", ownerId);
+                long videoId = item.optLong("id");
+                if (videoId == 0) continue;
+                String key = videoOwner + "_" + videoId;
+                if (!seen.add(key)) continue;
+
+                String accessKey = item.optString("access_key", "");
+                String fullId = key + (accessKey.isEmpty() ? "" : "_" + accessKey);
+                String title = clean(item.optString("title", ""), "Видео " + key);
+                String image = videoImage(item);
+                result.add(new Video(fullId, title, image,
+                        "https://vkvideo.ru/video" + fullId));
+            }
+
+            int total = response.optInt("count", items.length());
+            if (items.length() < VK_PAGE_SIZE || (page + 1) * VK_PAGE_SIZE >= total) break;
         }
         return result;
     }
 
-    private void addVideo(List<Video> out, Set<String> seen, String html, String id, String anchor) {
-        if (!seen.add(id)) return;
-        int at = html.indexOf(id);
-        int from = Math.max(0, at - 1600);
-        int to = Math.min(html.length(), at + 1800);
-        String around = html.substring(from, to) + " " + anchor;
-        String title = firstValue(around, new String[]{"title", "aria-label", "alt", "name"});
-        if (title == null || title.length() < 2) {
-            Matcher text = Pattern.compile(">([^<>]{4,180})<").matcher(anchor);
-            if (text.find()) title = decode(text.group(1));
-        }
-        if (title == null || title.trim().isEmpty()) title = "Видео " + id;
-        String image = firstImage(around);
-        out.add(new Video(id, clean(title, "Видео " + id), image,
-                "https://vkvideo.ru/video" + id));
+    private static String extractScreenName(String channelUrl) {
+        Matcher matcher = Pattern.compile("@([^/?#]+)").matcher(channelUrl);
+        if (!matcher.find()) throw new IllegalArgumentException("В ссылке не найдено имя канала");
+        return matcher.group(1);
     }
 
-    private static String firstValue(String text, String[] keys) {
-        for (String key : keys) {
-            Matcher m = Pattern.compile("[\\\"']" + key
-                    + "[\\\"']\\s*:\\s*[\\\"']([^\\\"']{2,240})[\\\"']",
-                    Pattern.CASE_INSENSITIVE).matcher(text);
-            if (m.find()) return decode(m.group(1));
-            m = Pattern.compile(key + "\\s*=\\s*[\"']([^\"']{2,240})[\"']",
-                    Pattern.CASE_INSENSITIVE).matcher(text);
-            if (m.find()) return decode(m.group(1));
-        }
-        return null;
-    }
-
-    private static String firstImage(String text) {
-        Matcher m = Pattern.compile("https?://[^\\s\\\"'<>]+?\\.(?:jpg|jpeg|png|webp)(?:\\?[^\\s\\\"'<>]*)?",
-                Pattern.CASE_INSENSITIVE).matcher(text);
-        if (m.find()) return m.group();
-        return null;
-    }
-
-    private static String findMeta(String html, String property) {
-        Matcher m = Pattern.compile("<meta[^>]+(?:property|name)=[\\\"']"
-                + Pattern.quote(property) + "[\\\"'][^>]+content=[\\\"']([^\\\"']+)",
-                Pattern.CASE_INSENSITIVE).matcher(html);
-        if (m.find()) return decode(m.group(1));
-        return null;
-    }
-
-    private static String fetch(String address) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL(address).openConnection();
-        try {
-            c.setInstanceFollowRedirects(true);
-            c.setConnectTimeout(15000);
-            c.setReadTimeout(25000);
-            c.setRequestProperty("User-Agent", UA);
-            c.setRequestProperty("Accept-Language", "ru,en;q=0.8");
-            c.setRequestProperty("Referer", "https://vkvideo.ru/");
-            int code = c.getResponseCode();
-            if (code < 200 || code >= 300) throw new IllegalStateException("HTTP " + code);
-            try (InputStream in = c.getInputStream()) {
-                ByteArrayOutputStream out = new ByteArrayOutputStream();
-                byte[] buf = new byte[8192];
-                int n;
-                while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
-                return out.toString("UTF-8");
+    private static String videoImage(JSONObject video) {
+        org.json.JSONArray images = video.optJSONArray("image");
+        String best = "";
+        int bestWidth = -1;
+        if (images != null) {
+            for (int i = 0; i < images.length(); i++) {
+                JSONObject image = images.optJSONObject(i);
+                if (image == null) continue;
+                String url = image.optString("url", "");
+                int width = image.optInt("width");
+                if (!url.isEmpty() && width > bestWidth && width <= 800) {
+                    best = url;
+                    bestWidth = width;
+                }
             }
-        } finally { c.disconnect(); }
+            if (best.isEmpty()) {
+                for (int i = 0; i < images.length(); i++) {
+                    JSONObject image = images.optJSONObject(i);
+                    if (image != null && !image.optString("url", "").isEmpty()) {
+                        best = image.optString("url");
+                        break;
+                    }
+                }
+            }
+        }
+        if (!best.isEmpty()) return best;
+        String[] fields = {"first_frame", "photo_800", "photo_640", "photo_320"};
+        for (String field : fields) {
+            String value = video.optString(field, "");
+            if (value.startsWith("http")) return value;
+        }
+        return "";
+    }
+
+    private static JSONObject callVkApi(String method, String params) throws Exception {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            String token = getAnonymousToken();
+            String address = "https://api.vk.com/method/" + method + "?v="
+                    + VK_API_VERSION + "&" + params + "&access_token="
+                    + android.net.Uri.encode(token);
+            JSONObject root = vkGetJson(address);
+            JSONObject error = root.optJSONObject("error");
+            if (error == null) return root;
+            int code = error.optInt("error_code");
+            if (code == 5 && attempt == 0) {
+                clearAnonymousToken();
+                continue;
+            }
+            throw new IllegalStateException("VK API " + method + ": "
+                    + error.optString("error_msg", "ошибка запроса") + " (код " + code + ")");
+        }
+        throw new IllegalStateException("Не удалось получить доступ к VK API");
+    }
+
+    private static synchronized String getAnonymousToken() throws Exception {
+        long now = System.currentTimeMillis() / 1000L;
+        if (anonymousToken != null && now + 60 < tokenExpiresAt) return anonymousToken;
+
+        HttpURLConnection connection = (HttpURLConnection) new URL(
+                "https://login.vk.com/?act=get_anonym_token").openConnection();
+        try {
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(VK_TIMEOUT_MS);
+            connection.setReadTimeout(VK_TIMEOUT_MS);
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setRequestProperty("User-Agent", UA);
+            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+            connection.setRequestProperty("Origin", "https://vkvideo.ru");
+            connection.setRequestProperty("Referer", "https://vkvideo.ru/");
+            byte[] body = ("client_id=" + VK_CLIENT_ID).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            connection.setFixedLengthStreamingMode(body.length);
+            try (java.io.OutputStream output = connection.getOutputStream()) {
+                output.write(body);
+            }
+            int code = connection.getResponseCode();
+            if (code < 200 || code >= 300) {
+                throw new IllegalStateException("VK login HTTP " + code + " (redirects disabled)");
+            }
+            JSONObject root = new JSONObject(readVkResponse(connection));
+            if (!"okay".equals(root.optString("type"))) {
+                throw new IllegalStateException("VK не выдал анонимную сессию");
+            }
+            JSONObject data = root.optJSONObject("data");
+            anonymousToken = data == null ? null : data.optString("access_token", null);
+            tokenExpiresAt = data == null ? 0 : data.optLong("expired_at");
+            if (anonymousToken == null || anonymousToken.isEmpty()) {
+                throw new IllegalStateException("VK не вернул анонимный токен");
+            }
+            return anonymousToken;
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private static synchronized void clearAnonymousToken() {
+        anonymousToken = null;
+        tokenExpiresAt = 0;
+    }
+
+    private static JSONObject vkGetJson(String address) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
+        try {
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(VK_TIMEOUT_MS);
+            connection.setReadTimeout(VK_TIMEOUT_MS);
+            connection.setRequestProperty("User-Agent", UA);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Accept-Language", "ru-RU,ru;q=0.9");
+            int code = connection.getResponseCode();
+            if (code < 200 || code >= 300) {
+                throw new IllegalStateException("VK API HTTP " + code + " (redirects disabled)");
+            }
+            return new JSONObject(readVkResponse(connection));
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private static String readVkResponse(HttpURLConnection connection) throws Exception {
+        try (InputStream in = connection.getInputStream();
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int count;
+            int total = 0;
+            while ((count = in.read(buffer)) != -1) {
+                total += count;
+                if (total > 6 * 1024 * 1024) throw new IllegalStateException("Ответ VK слишком большой");
+                out.write(buffer, 0, count);
+            }
+            return out.toString("UTF-8");
+        }
     }
 
     private static Bitmap fetchBitmap(String address) {
