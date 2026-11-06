@@ -365,13 +365,12 @@ private void addOwnerVideos(List<Video> result, Set<String> seen, long ownerId)
 private List<Video> markLiveFromApi(List<Video> videos) {
     if (videos.isEmpty()) return videos;
     try {
-        // Собираем id в формате owner_id_video_id (без access_key)
         StringBuilder ids = new StringBuilder();
         List<String> keys = new ArrayList<>();
         for (Video v : videos) {
-            if (v.live) continue; // уже помечены
             String key = v.id;
-            // id может быть "owner_video" или "owner_video_accesskey"
+            // пропускаем только записи Live API без owner_id_video_id
+            if (key.startsWith("live:")) continue;
             int first = key.indexOf('_');
             if (first <= 0) continue;
             int second = key.indexOf('_', first + 1);
@@ -379,7 +378,7 @@ private List<Video> markLiveFromApi(List<Video> videos) {
             if (ids.length() > 0) ids.append(',');
             ids.append(shortId);
             keys.add(shortId);
-            if (keys.size() >= 20) break; // лимит пачки
+            if (keys.size() >= 50) break; // можно больше, API принимает пачку
         }
         if (keys.isEmpty()) return videos;
 
@@ -388,11 +387,11 @@ private List<Video> markLiveFromApi(List<Video> videos) {
         String body = "video_ids=" + android.net.Uri.encode(ids.toString());
         JSONObject root = vkAuthorizedPost(address, body);
         org.json.JSONArray arr = root.optJSONArray("response");
+        if (arr == null) arr = root.optJSONArray("items");
         if (arr == null) {
-            // иногда ответ лежит прямо в root как response:object
-            arr = root.optJSONArray("items");
+            // нет ответа — снимаем все live, кроме live.vkvideo.ru
+            return demoteAllExceptLiveApi(videos);
         }
-        if (arr == null) return videos;
 
         Set<String> liveKeys = new HashSet<>();
         for (int i = 0; i < arr.length(); i++) {
@@ -405,26 +404,41 @@ private List<Video> markLiveFromApi(List<Video> videos) {
                 if (oid != 0 && vid != 0) liveKeys.add(oid + "_" + vid);
             }
         }
-        if (liveKeys.isEmpty()) return videos;
 
         List<Video> updated = new ArrayList<>(videos.size());
         for (Video v : videos) {
-            String key = v.id;
-            int first = key.indexOf('_');
-            int second = first > 0 ? key.indexOf('_', first + 1) : -1;
-            String shortId = second > 0 ? key.substring(0, second) : key;
-            boolean isLive = v.live || liveKeys.contains(shortId);
+            if (v.id.startsWith("live:")) {
+                updated.add(v); // из Live API — оставляем
+                continue;
+            }
+            int first = v.id.indexOf('_');
+            int second = first > 0 ? v.id.indexOf('_', first + 1) : -1;
+            String shortId = second > 0 ? v.id.substring(0, second) : v.id;
+            boolean isLive = liveKeys.contains(shortId);
             if (isLive == v.live) {
                 updated.add(v);
             } else {
-                updated.add(new Video(v.id, v.title, v.image, true, v.url));
+                updated.add(new Video(v.id, v.title, v.image, isLive, v.url));
             }
         }
         return updated;
     } catch (Exception e) {
-        // не ломаем весь список из-за ошибки статуса
-        return videos;
+        // при ошибке API лучше снять сомнительные live, чем показывать ложные
+        return demoteAllExceptLiveApi(videos);
     }
+}
+
+/** Снять LIVE у всех, кроме записей из api.live.vkvideo.ru */
+private static List<Video> demoteAllExceptLiveApi(List<Video> videos) {
+    List<Video> out = new ArrayList<>(videos.size());
+    for (Video v : videos) {
+        if (v.live && !v.id.startsWith("live:")) {
+            out.add(new Video(v.id, v.title, v.image, false, v.url));
+        } else {
+            out.add(v);
+        }
+    }
+    return out;
 }
 
 private static List<Video> prioritizeLive(List<Video> videos) {
@@ -531,21 +545,15 @@ private static List<Video> prioritizeLive(List<Video> videos) {
      * (BasePropertyExists). It may be represented as an object or a scalar
      * depending on the API response version.
      */
- private static boolean isLiveVideo(JSONObject video) {
+private static boolean isLiveVideo(JSONObject video) {
     String status = video.optString("live_status", "");
+    // started = в эфире, waiting = скоро / ожидание
     if ("started".equalsIgnoreCase(status) || "waiting".equalsIgnoreCase(status)) {
         return true;
     }
-    if (!video.has("live") || video.isNull("live")) return false;
-    Object value = video.opt("live");
-    if (value instanceof Boolean) return (Boolean) value;
-    if (value instanceof Number) return ((Number) value).intValue() != 0;
-    if (value instanceof String) {
-        String text = ((String) value).trim();
-        return !text.isEmpty() && !"0".equals(text)
-                && !"false".equalsIgnoreCase(text);
-    }
-    return value instanceof JSONObject;
+    // postlive / finished / failed / пусто — НЕ live
+    // Поле live:1 у VK остаётся и после окончания трансляции — игнорируем его.
+    return false;
 }
 
     private static List<JSONObject> pageVideos(JSONObject response) {
