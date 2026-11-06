@@ -102,10 +102,11 @@ public final class LiveChannelsView extends LinearLayout {
     content.addView(add, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
     // Сначала рисуем строки с placeholder, потом подгружаем фото пачкой
-    final ImageView[] avatars = new ImageView[channels.size()];
-    final TextView[] titles = new TextView[channels.size()];
-    for (int i = 0; i < channels.size(); i++) {
-        Channel channel = channels.get(i);
+    final List<Channel> channelSnapshot = new ArrayList<>(channels);
+    final ImageView[] avatars = new ImageView[channelSnapshot.size()];
+    final TextView[] titles = new TextView[channelSnapshot.size()];
+    for (int i = 0; i < channelSnapshot.size(); i++) {
+        Channel channel = channelSnapshot.get(i);
         LinearLayout row = new LinearLayout(getContext());
         row.setOrientation(HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -162,16 +163,17 @@ public final class LiveChannelsView extends LinearLayout {
         });
         content.addView(row, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
     }
-    loadChannelAvatars(avatars, titles);
+    loadChannelAvatars(avatars, titles, channelSnapshot);
 }
 
   
-private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titles) {
+private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titles,
+                                final List<Channel> channelSnapshot) {
     executor.execute(() -> {
         // 1) Сразу из кэша (память / диск) — без сети
-        for (int i = 0; i < channels.size(); i++) {
+        for (int i = 0; i < channelSnapshot.size(); i++) {
             final int index = i;
-            String screen = extractScreenName(channels.get(i).url)
+            String screen = extractScreenName(channelSnapshot.get(i).url)
                     .toLowerCase(java.util.Locale.ROOT);
             final Bitmap cached = loadAvatarCached(screen, null); // null = только кэш
             if (cached != null) {
@@ -185,7 +187,7 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
         // 2) Потом сеть: имена + обновление фото при необходимости
         try {
             StringBuilder ids = new StringBuilder();
-            for (Channel ch : channels) {
+            for (Channel ch : channelSnapshot) {
                 if (ids.length() > 0) ids.append(',');
                 ids.append(extractScreenName(ch.url));
             }
@@ -210,8 +212,8 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
                 final String photoUrl = photo;
 
                 int found = -1;
-                for (int c = 0; c < channels.size(); c++) {
-                    if (extractScreenName(channels.get(c).url)
+                for (int c = 0; c < channelSnapshot.size(); c++) {
+                    if (extractScreenName(channelSnapshot.get(c).url)
                             .toLowerCase(java.util.Locale.ROOT).equals(screen)) {
                         found = c;
                         break;
