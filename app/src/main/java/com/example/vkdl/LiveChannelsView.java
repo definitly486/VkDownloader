@@ -256,6 +256,13 @@ public final class LiveChannelsView extends LinearLayout {
 
     private List<Video> scanVideos(String channelUrl) throws Exception {
         String screenName = extractScreenName(channelUrl);
+        List<Video> result = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+
+        // VK Video Live has a separate API. Its channel response contains the
+        // currently running stream; the ordinary VK Video catalog often omits it.
+        addCurrentLiveStream(result, seen, channelUrl);
+
         JSONObject first = vkSearchPage(screenName);
         List<JSONObject> firstItems = pageVideos(first);
         if (firstItems.isEmpty()) {
@@ -282,8 +289,6 @@ public final class LiveChannelsView extends LinearLayout {
             }
         }
 
-        List<Video> result = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
         JSONObject page = first;
         for (int pageNumber = 0; pageNumber < VK_MAX_PAGES; pageNumber++) {
             for (JSONObject item : pageVideos(page)) {
@@ -304,6 +309,69 @@ public final class LiveChannelsView extends LinearLayout {
             }
         });
         return result;
+    }
+
+    private void addCurrentLiveStream(List<Video> result, Set<String> seen,
+                                      String channelUrl) throws Exception {
+        String address = "https://api.live.vkvideo.ru/v1/channel?channel_url="
+                + android.net.Uri.encode(channelUrl);
+        JSONObject root = liveApiGet(address);
+        JSONObject data = root.optJSONObject("data");
+        if (data == null) return;
+
+        JSONObject stream = data.optJSONObject("stream");
+        if (stream == null || stream.optString("status", "online").equalsIgnoreCase("offline")
+                || stream.optLong("ended_at", 0) > 0) {
+            org.json.JSONArray streams = data.optJSONArray("streams");
+            stream = null;
+            if (streams != null) {
+                for (int i = 0; i < streams.length(); i++) {
+                    JSONObject candidate = streams.optJSONObject(i);
+                    if (candidate != null && candidate.optLong("ended_at", 0) == 0
+                            && !candidate.optString("status", "").equalsIgnoreCase("offline")) {
+                        stream = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+        if (stream == null || stream.optLong("ended_at", 0) > 0) return;
+
+        JSONObject vkVideo = stream.optJSONObject("vk_video");
+        String id = "";
+        if (vkVideo != null) {
+            String ownerId = vkVideo.optString("owner_id", "");
+            String videoId = vkVideo.optString("video_id", "");
+            if (!ownerId.isEmpty() && !videoId.isEmpty()) id = ownerId + "_" + videoId;
+        }
+        if (id.isEmpty()) id = stream.optString("video_id", "");
+        if (id.isEmpty()) return;
+        String key = id.replace('_', ':');
+        if (!seen.add(key)) return;
+
+        String title = clean(stream.optString("title", ""), "Прямой эфир");
+        String image = stream.optString("preview_url", "");
+        result.add(new Video(id, title, image, true, "https://vkvideo.ru/video" + id));
+    }
+
+    private static JSONObject liveApiGet(String address) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
+        try {
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(VK_TIMEOUT_MS);
+            connection.setReadTimeout(VK_TIMEOUT_MS);
+            connection.setRequestProperty("User-Agent", UA);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Referer", "https://vkvideo.ru/");
+            int code = connection.getResponseCode();
+            if (code == 404) return new JSONObject();
+            if (code < 200 || code >= 300) {
+                throw new IllegalStateException("VK Live API HTTP " + code);
+            }
+            return new JSONObject(readVkResponse(connection));
+        } finally {
+            connection.disconnect();
+        }
     }
 
     private void addApiVideo(List<Video> result, Set<String> seen, JSONObject item) {
