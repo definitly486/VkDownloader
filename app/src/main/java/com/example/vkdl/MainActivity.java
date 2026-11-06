@@ -132,12 +132,42 @@ public class MainActivity extends Activity {
         status = new TextView(this);
         status.setText("Вставьте ссылку VK / VK Video / live");
 
-        root.addView(input);
-        root.addView(button);
-        root.addView(progress);
-        root.addView(downloadProgress);
-        root.addView(cancelDownloadButton);
-        root.addView(status);
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+
+        Button videoTab = new Button(this);
+        videoTab.setText("Видео");
+        Button liveTab = new Button(this);
+        liveTab.setText("Live");
+
+        LinearLayout mainPage = new LinearLayout(this);
+        mainPage.setOrientation(LinearLayout.VERTICAL);
+        mainPage.addView(input);
+        mainPage.addView(button);
+        mainPage.addView(progress);
+        mainPage.addView(downloadProgress);
+        mainPage.addView(cancelDownloadButton);
+        mainPage.addView(status);
+
+        LiveChannelsView livePage = new LiveChannelsView(this);
+        livePage.setVisibility(View.GONE);
+
+        tabs.addView(videoTab, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        tabs.addView(liveTab, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        videoTab.setOnClickListener(v -> {
+            mainPage.setVisibility(View.VISIBLE);
+            livePage.setVisibility(View.GONE);
+        });
+        liveTab.setOnClickListener(v -> {
+            mainPage.setVisibility(View.GONE);
+            livePage.setVisibility(View.VISIBLE);
+        });
+
+        root.addView(tabs);
+        root.addView(mainPage, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        root.addView(livePage, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         setContentView(root);
 
         askPermissions();
