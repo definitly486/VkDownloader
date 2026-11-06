@@ -56,18 +56,28 @@ public final class LiveChannelsView extends LinearLayout {
         void onVideoClick(String url, String title);
     }
 
-    private final ExecutorService executor = Executors.newFixedThreadPool(3);
+    // Отдельные пулы: сканирование каналов не должно ждать загрузки обложек предыдущего канала.
+    private final ExecutorService scanExecutor = Executors.newFixedThreadPool(2);
+    private final ExecutorService imageExecutor = Executors.newFixedThreadPool(4);
     private final LinearLayout content;
     private final OnVideoClickListener listener;
+    private final List<Channel> channels = new ArrayList<>();
 
-    // ↓ сюда
+    /** Инкрементируется при смене экрана — устаревшие задачи игнорируют результат. */
+    private volatile int loadGeneration = 0;
+
     private static final long AVATAR_CACHE_TTL_MS = 7L * 24 * 60 * 60 * 1000; // 7 дней
     private static final java.util.Map<String, Bitmap> avatarMemCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** Memory-кэш обложек видео (URL → Bitmap). */
+    private static final java.util.Map<String, Bitmap> thumbnailMemCache =
             new java.util.concurrent.ConcurrentHashMap<>();
 
     public LiveChannelsView(Context context, OnVideoClickListener listener) {
         super(context);
         this.listener = listener;
+        channels.addAll(java.util.Arrays.asList(CHANNELS));
+        loadSavedChannels();
         setOrientation(VERTICAL);
         setPadding(dp(8), dp(8), dp(8), dp(8));
 
@@ -87,12 +97,24 @@ public final class LiveChannelsView extends LinearLayout {
     }
 
   private void showChannels() {
+    loadGeneration++; // отменяем фоновые загрузки обложек предыдущего канала
     content.removeAllViews();
+    TextView add = new TextView(getContext());
+    add.setText("＋  Добавить канал");
+    add.setTextSize(16);
+    add.setTextColor(Color.rgb(25, 95, 170));
+    add.setGravity(Gravity.CENTER_VERTICAL);
+    add.setPadding(dp(12), dp(14), dp(12), dp(14));
+    add.setBackground(selectableBackground());
+    add.setOnClickListener(v -> showAddChannelDialog());
+    content.addView(add, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+
     // Сначала рисуем строки с placeholder, потом подгружаем фото пачкой
-    final ImageView[] avatars = new ImageView[CHANNELS.length];
-    final TextView[] titles = new TextView[CHANNELS.length];
-    for (int i = 0; i < CHANNELS.length; i++) {
-        Channel channel = CHANNELS[i];
+    final List<Channel> channelSnapshot = new ArrayList<>(channels);
+    final ImageView[] avatars = new ImageView[channelSnapshot.size()];
+    final TextView[] titles = new TextView[channelSnapshot.size()];
+    for (int i = 0; i < channelSnapshot.size(); i++) {
+        Channel channel = channelSnapshot.get(i);
         LinearLayout row = new LinearLayout(getContext());
         row.setOrientation(HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -119,6 +141,17 @@ public final class LiveChannelsView extends LinearLayout {
         row.addView(avatar, new LayoutParams(dp(54), dp(54)));
         avatars[i] = avatar;
 
+        // Показываем уже загруженный аватар прямо при построении списка.
+        // Не ставим чтение памяти в общий executor: он может быть занят
+        // долгим сканированием предыдущего канала.
+        String avatarKey = extractScreenName(channel.url)
+                .toLowerCase(java.util.Locale.ROOT);
+        Bitmap memoryAvatar = avatarMemCache.get(avatarKey);
+        if (memoryAvatar != null && !memoryAvatar.isRecycled()) {
+            avatar.setImageBitmap(memoryAvatar);
+            avatar.setBackground(null);
+        }
+
         LinearLayout labels = new LinearLayout(getContext());
         labels.setOrientation(VERTICAL);
         labels.setGravity(Gravity.CENTER_VERTICAL);
@@ -136,18 +169,30 @@ public final class LiveChannelsView extends LinearLayout {
         titles[i] = title;
         row.addView(labels, new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
         row.setOnClickListener(v -> loadChannel(channel));
+        if (channel.removable) row.setOnLongClickListener(v -> {
+            new android.app.AlertDialog.Builder(getContext())
+                    .setMessage("Удалить канал " + channel.title + "?")
+                    .setNegativeButton("Отмена", null)
+                    .setPositiveButton("Удалить", (dialog, which) -> {
+                        channels.remove(channel);
+                        saveChannels();
+                        showChannels();
+                    }).show();
+            return true;
+        });
         content.addView(row, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
     }
-    loadChannelAvatars(avatars, titles);
+    loadChannelAvatars(avatars, titles, channelSnapshot);
 }
 
   
-private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titles) {
-    executor.execute(() -> {
+private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titles,
+                                final List<Channel> channelSnapshot) {
+    imageExecutor.execute(() -> {
         // 1) Сразу из кэша (память / диск) — без сети
-        for (int i = 0; i < CHANNELS.length; i++) {
+        for (int i = 0; i < channelSnapshot.size(); i++) {
             final int index = i;
-            String screen = extractScreenName(CHANNELS[i].url)
+            String screen = extractScreenName(channelSnapshot.get(i).url)
                     .toLowerCase(java.util.Locale.ROOT);
             final Bitmap cached = loadAvatarCached(screen, null); // null = только кэш
             if (cached != null) {
@@ -161,7 +206,7 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
         // 2) Потом сеть: имена + обновление фото при необходимости
         try {
             StringBuilder ids = new StringBuilder();
-            for (Channel ch : CHANNELS) {
+            for (Channel ch : channelSnapshot) {
                 if (ids.length() > 0) ids.append(',');
                 ids.append(extractScreenName(ch.url));
             }
@@ -186,8 +231,8 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
                 final String photoUrl = photo;
 
                 int found = -1;
-                for (int c = 0; c < CHANNELS.length; c++) {
-                    if (extractScreenName(CHANNELS[c].url)
+                for (int c = 0; c < channelSnapshot.size(); c++) {
+                    if (extractScreenName(channelSnapshot.get(c).url)
                             .toLowerCase(java.util.Locale.ROOT).equals(screen)) {
                         found = c;
                         break;
@@ -216,7 +261,96 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
 }
 
 
+    private void showAddChannelDialog() {
+        final android.widget.EditText input = new android.widget.EditText(getContext());
+        input.setSingleLine(true);
+        input.setHint("https://vkvideo.ru/@channel");
+        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_URI);
+        int pad = dp(20);
+        android.widget.FrameLayout wrap = new android.widget.FrameLayout(getContext());
+        wrap.setPadding(pad, dp(8), pad, 0);
+        wrap.addView(input);
+        new android.app.AlertDialog.Builder(getContext())
+                .setTitle("Добавить канал VK Video")
+                .setMessage("Вставьте ссылку на канал или имя @канала")
+                .setView(wrap)
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Добавить", (dialog, which) -> {
+                    String value = input.getText().toString().trim();
+                    try {
+                        String screen = normalizeChannelName(value);
+                        String key = screen.toLowerCase(java.util.Locale.ROOT);
+                        for (Channel existing : channels) {
+                            if (extractScreenName(existing.url).equalsIgnoreCase(key)) {
+                                android.widget.Toast.makeText(getContext(),
+                                        "Этот канал уже добавлен", android.widget.Toast.LENGTH_SHORT).show();
+                                return;
+                            }
+                        }
+                        Channel channel = new Channel("@" + screen,
+                                "https://vkvideo.ru/@" + screen, true);
+                        channels.add(channel);
+                        saveChannels();
+                        showChannels();
+                        loadChannel(channel);
+                    } catch (Exception e) {
+                        android.widget.Toast.makeText(getContext(),
+                                "Не удалось распознать канал. Укажите ссылку вида vkvideo.ru/@имя",
+                                android.widget.Toast.LENGTH_LONG).show();
+                    }
+                }).show();
+    }
+
+    private String normalizeChannelName(String value) {
+        if (value == null || value.trim().isEmpty()) throw new IllegalArgumentException("empty");
+        String name = value.trim();
+        if (name.startsWith("@")) name = name.substring(1);
+        else if (name.matches("(?i)^https?://.*")) {
+            java.util.regex.Matcher matcher = Pattern.compile(
+                    "(?i)(?:vkvideo\\.ru|live\\.vkvideo\\.ru)/@([^/?#]+)")
+                    .matcher(name);
+            if (!matcher.find()) throw new IllegalArgumentException("unsupported channel URL");
+            name = matcher.group(1);
+        } else if (name.contains("/") || name.contains(" ")) {
+            throw new IllegalArgumentException("unsupported channel");
+        }
+        if (!name.matches("[A-Za-z0-9_.-]{2,64}")) throw new IllegalArgumentException("invalid name");
+        return name;
+    }
+
+    private void loadSavedChannels() {
+        try {
+            String raw = getContext().getSharedPreferences("vk_live_channels",
+                    Context.MODE_PRIVATE).getString("custom", "[]");
+            org.json.JSONArray array = new org.json.JSONArray(raw);
+            for (int i = 0; i < array.length(); i++) {
+                org.json.JSONObject item = array.optJSONObject(i);
+                if (item == null) continue;
+                String name = item.optString("name", "");
+                String url = item.optString("url", "");
+                if (!name.isEmpty() && !url.isEmpty()) channels.add(new Channel(name, url, true));
+            }
+        } catch (Exception ignored) { }
+    }
+
+    private void saveChannels() {
+        try {
+            org.json.JSONArray array = new org.json.JSONArray();
+            for (Channel channel : channels) {
+                if (!channel.removable) continue;
+                org.json.JSONObject item = new org.json.JSONObject();
+                item.put("name", channel.title);
+                item.put("url", channel.url);
+                array.put(item);
+            }
+            getContext().getSharedPreferences("vk_live_channels", Context.MODE_PRIVATE)
+                    .edit().putString("custom", array.toString()).apply();
+        } catch (Exception ignored) { }
+    }
+
     private void loadChannel(Channel channel) {
+        final int generation = ++loadGeneration;
         content.removeAllViews();
         LinearLayout top = new LinearLayout(getContext());
         top.setGravity(Gravity.CENTER_VERTICAL);
@@ -240,10 +374,11 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
         status.setPadding(dp(8), dp(12), dp(8), dp(12));
         content.addView(status);
 
-        executor.execute(() -> {
+        scanExecutor.execute(() -> {
             try {
                 List<Video> videos = scanVideos(channel.url);
                 postToUi(() -> {
+                    if (generation != loadGeneration) return;
                     if (content.getChildCount() < 2 || content.getChildAt(1) != status) return;
                     content.removeView(status);
                     if (videos.isEmpty()) {
@@ -259,16 +394,19 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
                         count.setTextColor(Color.DKGRAY);
                         count.setPadding(dp(8), dp(4), dp(8), dp(10));
                         content.addView(count);
-                        addVideoGrid(videos);
+                        addVideoGrid(videos, generation);
                     }
                 });
             } catch (Exception e) {
-                postToUi(() -> status.setText("Ошибка загрузки канала: " + e.getMessage()));
+                postToUi(() -> {
+                    if (generation != loadGeneration) return;
+                    status.setText("Ошибка загрузки канала: " + e.getMessage());
+                });
             }
         });
     }
 
-    private void addVideoGrid(List<Video> videos) {
+    private void addVideoGrid(List<Video> videos, int generation) {
         LinearLayout grid = new LinearLayout(getContext());
         grid.setOrientation(VERTICAL);
         content.addView(grid, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
@@ -276,11 +414,11 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
             LinearLayout line = new LinearLayout(getContext());
             line.setOrientation(HORIZONTAL);
             Video left = videos.get(i);
-            line.addView(createTile(left), new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
+            line.addView(createTile(left, generation), new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
             if (i + 1 < videos.size()) {
                 View gap = new View(getContext());
                 line.addView(gap, new LayoutParams(dp(8), 1));
-                line.addView(createTile(videos.get(i + 1)),
+                line.addView(createTile(videos.get(i + 1), generation),
                         new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
             } else {
                 line.addView(new View(getContext()), new LayoutParams(0, 1, 1f));
@@ -291,7 +429,7 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
         }
     }
 
-    private View createTile(Video video) {
+    private View createTile(Video video, int generation) {
         LinearLayout tile = new LinearLayout(getContext());
         tile.setOrientation(VERTICAL);
         tile.setPadding(dp(6), dp(6), dp(6), dp(8));
@@ -335,10 +473,25 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
         tile.addView(title);
         tile.setOnClickListener(v -> listener.onVideoClick(video.url, video.title));
 
-        if (video.image != null) executor.execute(() -> {
-            Bitmap bitmap = fetchBitmap(video.image);
-            if (bitmap != null) cover.post(() -> cover.setImageBitmap(bitmap));
-        });
+        if (video.image != null) {
+            // Сначала memory-кэш — без сети и без очереди
+            Bitmap cached = thumbnailMemCache.get(video.image);
+            if (cached != null && !cached.isRecycled()) {
+                cover.setImageBitmap(cached);
+            } else {
+                imageExecutor.execute(() -> {
+                    if (generation != loadGeneration) return;
+                    Bitmap bitmap = fetchBitmap(video.image);
+                    if (bitmap == null || generation != loadGeneration) return;
+                    thumbnailMemCache.put(video.image, bitmap);
+                    cover.post(() -> {
+                        if (generation == loadGeneration) {
+                            cover.setImageBitmap(bitmap);
+                        }
+                    });
+                });
+            }
+        }
         return tile;
     }
 
@@ -991,13 +1144,21 @@ private Bitmap loadAvatarCached(String screenName, String photoUrl) {
     }
 
     @Override protected void onDetachedFromWindow() {
-        executor.shutdownNow();
+        loadGeneration++;
+        scanExecutor.shutdownNow();
+        imageExecutor.shutdownNow();
         super.onDetachedFromWindow();
     }
 
     private static final class Channel {
         final String title, url;
-        Channel(String title, String url) { this.title = title; this.url = url; }
+        final boolean removable;
+        Channel(String title, String url) { this(title, url, false); }
+        Channel(String title, String url, boolean removable) {
+            this.title = title;
+            this.url = url;
+            this.removable = removable;
+        }
     }
 
     private static final class Video {
