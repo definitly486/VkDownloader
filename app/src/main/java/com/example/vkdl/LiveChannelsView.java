@@ -118,10 +118,10 @@ public final class LiveChannelsView extends LinearLayout {
                 String html = fetch(channel.url);
                 String image = findMeta(html, "og:image");
                 String name = findMeta(html, "og:title");
-                if (name != null) title.postToUi(() -> title.setText(clean(name, channel.title)));
+                if (name != null) title.post(() -> title.setText(clean(name, channel.title)));
                 if (image != null) {
                     Bitmap bitmap = fetchBitmap(image);
-                    if (bitmap != null) avatar.postToUi(() -> avatar.setImageBitmap(bitmap));
+                    if (bitmap != null) avatar.post(() -> avatar.setImageBitmap(bitmap));
                 }
             } catch (Exception ignored) { }
         });
@@ -226,7 +226,7 @@ public final class LiveChannelsView extends LinearLayout {
 
         if (video.image != null) executor.execute(() -> {
             Bitmap bitmap = fetchBitmap(video.image);
-            if (bitmap != null) cover.postToUi(() -> cover.setImageBitmap(bitmap));
+            if (bitmap != null) cover.post(() -> cover.setImageBitmap(bitmap));
         });
         return tile;
     }
