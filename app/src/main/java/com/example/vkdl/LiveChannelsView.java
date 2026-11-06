@@ -56,14 +56,21 @@ public final class LiveChannelsView extends LinearLayout {
         void onVideoClick(String url, String title);
     }
 
-    private final ExecutorService executor = Executors.newFixedThreadPool(3);
+    // Отдельные пулы: сканирование каналов не должно ждать загрузки обложек предыдущего канала.
+    private final ExecutorService scanExecutor = Executors.newFixedThreadPool(2);
+    private final ExecutorService imageExecutor = Executors.newFixedThreadPool(4);
     private final LinearLayout content;
     private final OnVideoClickListener listener;
     private final List<Channel> channels = new ArrayList<>();
 
-    // ↓ сюда
+    /** Инкрементируется при смене экрана — устаревшие задачи игнорируют результат. */
+    private volatile int loadGeneration = 0;
+
     private static final long AVATAR_CACHE_TTL_MS = 7L * 24 * 60 * 60 * 1000; // 7 дней
     private static final java.util.Map<String, Bitmap> avatarMemCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** Memory-кэш обложек видео (URL → Bitmap). */
+    private static final java.util.Map<String, Bitmap> thumbnailMemCache =
             new java.util.concurrent.ConcurrentHashMap<>();
 
     public LiveChannelsView(Context context, OnVideoClickListener listener) {
@@ -90,6 +97,7 @@ public final class LiveChannelsView extends LinearLayout {
     }
 
   private void showChannels() {
+    loadGeneration++; // отменяем фоновые загрузки обложек предыдущего канала
     content.removeAllViews();
     TextView add = new TextView(getContext());
     add.setText("＋  Добавить канал");
@@ -180,7 +188,7 @@ public final class LiveChannelsView extends LinearLayout {
   
 private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titles,
                                 final List<Channel> channelSnapshot) {
-    executor.execute(() -> {
+    imageExecutor.execute(() -> {
         // 1) Сразу из кэша (память / диск) — без сети
         for (int i = 0; i < channelSnapshot.size(); i++) {
             final int index = i;
@@ -342,6 +350,7 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
     }
 
     private void loadChannel(Channel channel) {
+        final int generation = ++loadGeneration;
         content.removeAllViews();
         LinearLayout top = new LinearLayout(getContext());
         top.setGravity(Gravity.CENTER_VERTICAL);
@@ -365,10 +374,11 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
         status.setPadding(dp(8), dp(12), dp(8), dp(12));
         content.addView(status);
 
-        executor.execute(() -> {
+        scanExecutor.execute(() -> {
             try {
                 List<Video> videos = scanVideos(channel.url);
                 postToUi(() -> {
+                    if (generation != loadGeneration) return;
                     if (content.getChildCount() < 2 || content.getChildAt(1) != status) return;
                     content.removeView(status);
                     if (videos.isEmpty()) {
@@ -384,16 +394,19 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
                         count.setTextColor(Color.DKGRAY);
                         count.setPadding(dp(8), dp(4), dp(8), dp(10));
                         content.addView(count);
-                        addVideoGrid(videos);
+                        addVideoGrid(videos, generation);
                     }
                 });
             } catch (Exception e) {
-                postToUi(() -> status.setText("Ошибка загрузки канала: " + e.getMessage()));
+                postToUi(() -> {
+                    if (generation != loadGeneration) return;
+                    status.setText("Ошибка загрузки канала: " + e.getMessage());
+                });
             }
         });
     }
 
-    private void addVideoGrid(List<Video> videos) {
+    private void addVideoGrid(List<Video> videos, int generation) {
         LinearLayout grid = new LinearLayout(getContext());
         grid.setOrientation(VERTICAL);
         content.addView(grid, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
@@ -401,11 +414,11 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
             LinearLayout line = new LinearLayout(getContext());
             line.setOrientation(HORIZONTAL);
             Video left = videos.get(i);
-            line.addView(createTile(left), new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
+            line.addView(createTile(left, generation), new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
             if (i + 1 < videos.size()) {
                 View gap = new View(getContext());
                 line.addView(gap, new LayoutParams(dp(8), 1));
-                line.addView(createTile(videos.get(i + 1)),
+                line.addView(createTile(videos.get(i + 1), generation),
                         new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
             } else {
                 line.addView(new View(getContext()), new LayoutParams(0, 1, 1f));
@@ -416,7 +429,7 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
         }
     }
 
-    private View createTile(Video video) {
+    private View createTile(Video video, int generation) {
         LinearLayout tile = new LinearLayout(getContext());
         tile.setOrientation(VERTICAL);
         tile.setPadding(dp(6), dp(6), dp(6), dp(8));
@@ -460,10 +473,25 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
         tile.addView(title);
         tile.setOnClickListener(v -> listener.onVideoClick(video.url, video.title));
 
-        if (video.image != null) executor.execute(() -> {
-            Bitmap bitmap = fetchBitmap(video.image);
-            if (bitmap != null) cover.post(() -> cover.setImageBitmap(bitmap));
-        });
+        if (video.image != null) {
+            // Сначала memory-кэш — без сети и без очереди
+            Bitmap cached = thumbnailMemCache.get(video.image);
+            if (cached != null && !cached.isRecycled()) {
+                cover.setImageBitmap(cached);
+            } else {
+                imageExecutor.execute(() -> {
+                    if (generation != loadGeneration) return;
+                    Bitmap bitmap = fetchBitmap(video.image);
+                    if (bitmap == null || generation != loadGeneration) return;
+                    thumbnailMemCache.put(video.image, bitmap);
+                    cover.post(() -> {
+                        if (generation == loadGeneration) {
+                            cover.setImageBitmap(bitmap);
+                        }
+                    });
+                });
+            }
+        }
         return tile;
     }
 
@@ -1116,7 +1144,9 @@ private Bitmap loadAvatarCached(String screenName, String photoUrl) {
     }
 
     @Override protected void onDetachedFromWindow() {
-        executor.shutdownNow();
+        loadGeneration++;
+        scanExecutor.shutdownNow();
+        imageExecutor.shutdownNow();
         super.onDetachedFromWindow();
     }
 
