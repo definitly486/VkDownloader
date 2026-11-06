@@ -15,7 +15,8 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
-
+import java.io.File;
+import java.io.FileOutputStream;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
