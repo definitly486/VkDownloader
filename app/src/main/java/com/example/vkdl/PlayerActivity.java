@@ -3,6 +3,7 @@ package com.example.vkdl;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.content.ComponentName;
 import android.content.pm.ActivityInfo;
 import android.graphics.Color;
 import android.graphics.SurfaceTexture;
@@ -32,13 +33,9 @@ import androidx.media3.common.MediaItem;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
-import androidx.media3.common.VideoSize;
-import androidx.media3.datasource.DefaultHttpDataSource;
-import androidx.media3.exoplayer.ExoPlayer;
-import androidx.media3.exoplayer.hls.HlsMediaSource;
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
-import androidx.media3.exoplayer.source.MediaSource;
-import androidx.media3.exoplayer.source.ProgressiveMediaSource;
+import androidx.media3.session.MediaController;
+import androidx.media3.session.SessionToken;
+import com.google.common.util.concurrent.ListenableFuture;
 
 /**
  * Встроенный плеер без media3-ui: TextureView + свои кнопки.
@@ -62,7 +59,8 @@ public class PlayerActivity extends Activity implements TextureView.SurfaceTextu
         ctx.startActivity(i);
     }
 
-    private ExoPlayer player;
+    private MediaController player;
+    private ListenableFuture<MediaController> controllerFuture;
     private TextureView textureView;
     private Surface surface;
     private AudioManager audioManager;
@@ -231,6 +229,44 @@ public class PlayerActivity extends Activity implements TextureView.SurfaceTextu
 
         root.post(this::enterFullscreen);
 
+        /* PLAYBACK_SERVICE_CONNECT */
+        PlaybackService.startPlayback(this, url, title, isHls);
+        SessionToken token = new SessionToken(this,
+                new ComponentName(this, PlaybackService.class));
+        controllerFuture = new MediaController.Builder(this, token).buildAsync();
+        controllerFuture.addListener(() -> {
+            try {
+                player = controllerFuture.get();
+                player.addListener(new Player.Listener() {
+                    @Override public void onPlaybackStateChanged(int state) {
+                        buffering.setVisibility(state == Player.STATE_BUFFERING ? View.VISIBLE : View.GONE);
+                        updatePlayerControls();
+                    }
+                    @Override public void onIsPlayingChanged(boolean playing) { updatePlayerControls(); }
+                    @Override public void onPlayerError(PlaybackException error) {
+                        Toast.makeText(PlayerActivity.this,
+                                "Ошибка: " + error.getErrorCodeName() + "\\n" + error.getMessage(),
+                                Toast.LENGTH_LONG).show();
+                    }
+                });
+                if (surface != null) player.setVideoSurface(surface);
+                updatePlayerControls();
+            } catch (Exception e) {
+                Toast.makeText(PlayerActivity.this, "Не удалось подключить плеер: " + e.getMessage(),
+                        Toast.LENGTH_LONG).show();
+            }
+        }, Runnable::run);
+        ui.post(updateProgress);
+    }
+
+    private void updatePlayerControls() {
+        if (player == null || btnPlay == null) return;
+        btnPlay.setImageResource(player.isPlaying()
+                ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play);
+    }
+
+    /* OLD_PLAYER_SETUP_REMOVED */
+    /*
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(UA)
                 .setAllowCrossProtocolRedirects(true)
@@ -295,6 +331,7 @@ public class PlayerActivity extends Activity implements TextureView.SurfaceTextu
 
         ui.post(updateProgress);
     }
+    */
 
     private void togglePlay() {
         if (player == null) return;
@@ -493,12 +530,10 @@ public class PlayerActivity extends Activity implements TextureView.SurfaceTextu
     @Override
     protected void onStart() {
         super.onStart();
-        if (player != null) player.setPlayWhenReady(true);
     }
 
     @Override
     protected void onStop() {
-        if (player != null) player.setPlayWhenReady(false);
         super.onStop();
     }
 
@@ -507,8 +542,12 @@ public class PlayerActivity extends Activity implements TextureView.SurfaceTextu
         ui.removeCallbacks(updateProgress);
         btnFs.removeCallbacks(hideChrome);
         if (player != null) {
-            player.release();
+            player.clearVideoSurface();
             player = null;
+        }
+        if (controllerFuture != null) {
+            MediaController.releaseFuture(controllerFuture);
+            controllerFuture = null;
         }
         if (surface != null) {
             surface.release();
@@ -523,10 +562,6 @@ public class PlayerActivity extends Activity implements TextureView.SurfaceTextu
         if (isFullscreen) {
             exitFullscreen();
         } else {
-            if (player != null) {
-                player.release();
-                player = null;
-            }
             super.onBackPressed();
         }
     }
