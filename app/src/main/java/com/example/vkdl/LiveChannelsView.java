@@ -1,12 +1,10 @@
 package com.example.vkdl;
 
 import android.content.Context;
-import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
-import android.net.Uri;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.ImageView;
@@ -69,10 +67,7 @@ public final class LiveChannelsView extends LinearLayout {
         row.setClickable(true);
         row.setFocusable(true);
         row.setOnClickListener(v -> {
-            try {
-                Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(channel.url));
-                getContext().startActivity(intent);
-            } catch (Exception ignored) {}
+            ChannelBrowserActivity.start(getContext(), channel.url, channel.fallbackTitle);
         });
 
         ImageView avatar = new ImageView(getContext());
