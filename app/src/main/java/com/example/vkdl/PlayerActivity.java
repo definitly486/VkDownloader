@@ -2,6 +2,7 @@ package com.example.vkdl;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.os.IBinder;
