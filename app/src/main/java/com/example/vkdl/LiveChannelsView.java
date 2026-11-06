@@ -1,5 +1,8 @@
 package com.example.vkdl;
 
+import android.graphics.Outline;
+import android.view.View;
+import android.view.ViewOutlineProvider;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -77,12 +80,13 @@ public final class LiveChannelsView extends LinearLayout {
         showChannels();
     }
 
-    private void showChannels() {
-        content.removeAllViews();
-        for (Channel channel : CHANNELS) addChannelRow(channel);
-    }
-
-    private void addChannelRow(Channel channel) {
+  private void showChannels() {
+    content.removeAllViews();
+    // Сначала рисуем строки с placeholder, потом подгружаем фото пачкой
+    final ImageView[] avatars = new ImageView[CHANNELS.length];
+    final TextView[] titles = new TextView[CHANNELS.length];
+    for (int i = 0; i < CHANNELS.length; i++) {
+        Channel channel = CHANNELS[i];
         LinearLayout row = new LinearLayout(getContext());
         row.setOrientation(HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -97,9 +101,17 @@ public final class LiveChannelsView extends LinearLayout {
         placeholder.setShape(GradientDrawable.OVAL);
         placeholder.setColor(Color.rgb(225, 230, 238));
         avatar.setBackground(placeholder);
-        avatar.setClipToOutline(true);
         avatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        // круглый клип
+        avatar.setOutlineProvider(new android.view.ViewOutlineProvider() {
+            @Override
+            public void getOutline(View view, android.graphics.Outline outline) {
+                outline.setOval(0, 0, view.getWidth(), view.getHeight());
+            }
+        });
+        avatar.setClipToOutline(true);
         row.addView(avatar, new LayoutParams(dp(54), dp(54)));
+        avatars[i] = avatar;
 
         LinearLayout labels = new LinearLayout(getContext());
         labels.setOrientation(VERTICAL);
@@ -115,11 +127,73 @@ public final class LiveChannelsView extends LinearLayout {
         subtitle.setTextColor(Color.DKGRAY);
         labels.addView(title);
         labels.addView(subtitle);
+        titles[i] = title;
         row.addView(labels, new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
         row.setOnClickListener(v -> loadChannel(channel));
         content.addView(row, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
-
     }
+    loadChannelAvatars(avatars, titles);
+}
+
+  
+private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titles) {
+    executor.execute(() -> {
+        try {
+            StringBuilder ids = new StringBuilder();
+            for (Channel ch : CHANNELS) {
+                String name = extractScreenName(ch.url);
+                if (ids.length() > 0) ids.append(',');
+                ids.append(name);
+            }
+            String address = "https://api.vkvideo.ru/method/groups.getById?v="
+                    + VK_API_VERSION + "&client_id=" + VK_CLIENT_ID
+                    + "&group_ids=" + android.net.Uri.encode(ids.toString())
+                    + "&fields=photo_200,photo_100";
+            JSONObject response = vkAuthorizedGet(address);
+            org.json.JSONArray groups = response.optJSONArray("groups");
+            if (groups == null) {
+                // старый формат ответа — массив в response
+                // vkAuthorizedGet уже вернул response-объект
+                return;
+            }
+
+            // screen_name → photo + name
+            java.util.Map<String, String> photos = new java.util.HashMap<>();
+            java.util.Map<String, String> names = new java.util.HashMap<>();
+            for (int i = 0; i < groups.length(); i++) {
+                JSONObject g = groups.optJSONObject(i);
+                if (g == null) continue;
+                String screen = g.optString("screen_name", "").toLowerCase(java.util.Locale.ROOT);
+                String photo = g.optString("photo_200", "");
+                if (photo.isEmpty()) photo = g.optString("photo_100", "");
+                if (!screen.isEmpty() && !photo.isEmpty()) photos.put(screen, photo);
+                String name = g.optString("name", "");
+                if (!screen.isEmpty() && !name.isEmpty()) names.put(screen, name);
+            }
+
+            for (int i = 0; i < CHANNELS.length; i++) {
+                final int index = i;
+                String screen = extractScreenName(CHANNELS[i].url)
+                        .toLowerCase(java.util.Locale.ROOT);
+                final String photoUrl = photos.get(screen);
+                final String realName = names.get(screen);
+                if (realName != null && !realName.isEmpty()) {
+                    postToUi(() -> titles[index].setText(realName));
+                }
+                if (photoUrl == null || photoUrl.isEmpty()) continue;
+                final Bitmap bitmap = fetchBitmap(photoUrl);
+                if (bitmap == null) continue;
+                postToUi(() -> {
+                    avatars[index].setImageBitmap(bitmap);
+                    avatars[index].setBackground(null); // убрать серый круг
+                });
+            }
+        } catch (Exception ignored) {
+            // оставляем серые placeholder
+        }
+    });
+}
+
 
     private void loadChannel(Channel channel) {
         content.removeAllViews();
