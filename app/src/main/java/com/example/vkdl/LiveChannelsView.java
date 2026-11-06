@@ -144,12 +144,26 @@ public final class LiveChannelsView extends LinearLayout {
   
 private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titles) {
     executor.execute(() -> {
+        // 1) Сразу из кэша (память / диск) — без сети
+        for (int i = 0; i < CHANNELS.length; i++) {
+            final int index = i;
+            String screen = extractScreenName(CHANNELS[i].url)
+                    .toLowerCase(java.util.Locale.ROOT);
+            final Bitmap cached = loadAvatarCached(screen, null); // null = только кэш
+            if (cached != null) {
+                postToUi(() -> {
+                    avatars[index].setImageBitmap(cached);
+                    avatars[index].setBackground(null);
+                });
+            }
+        }
+
+        // 2) Потом сеть: имена + обновление фото при необходимости
         try {
             StringBuilder ids = new StringBuilder();
             for (Channel ch : CHANNELS) {
-                String name = extractScreenName(ch.url);
                 if (ids.length() > 0) ids.append(',');
-                ids.append(name);
+                ids.append(extractScreenName(ch.url));
             }
             String address = "https://api.vkvideo.ru/method/groups.getById?v="
                     + VK_API_VERSION + "&client_id=" + VK_CLIENT_ID
@@ -157,45 +171,46 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
                     + "&fields=photo_200,photo_100";
             JSONObject response = vkAuthorizedGet(address);
             org.json.JSONArray groups = response.optJSONArray("groups");
-            if (groups == null) {
-                // старый формат ответа — массив в response
-                // vkAuthorizedGet уже вернул response-объект
-                return;
-            }
+            if (groups == null) return;
 
-            // screen_name → photo + name
-            java.util.Map<String, String> photos = new java.util.HashMap<>();
-            java.util.Map<String, String> names = new java.util.HashMap<>();
             for (int i = 0; i < groups.length(); i++) {
                 JSONObject g = groups.optJSONObject(i);
                 if (g == null) continue;
-                String screen = g.optString("screen_name", "").toLowerCase(java.util.Locale.ROOT);
+                final String screen = g.optString("screen_name", "")
+                        .toLowerCase(java.util.Locale.ROOT);
+                if (screen.isEmpty()) continue;
+
+                final String realName = g.optString("name", "");
                 String photo = g.optString("photo_200", "");
                 if (photo.isEmpty()) photo = g.optString("photo_100", "");
-                if (!screen.isEmpty() && !photo.isEmpty()) photos.put(screen, photo);
-                String name = g.optString("name", "");
-                if (!screen.isEmpty() && !name.isEmpty()) names.put(screen, name);
-            }
+                final String photoUrl = photo;
 
-            for (int i = 0; i < CHANNELS.length; i++) {
-                final int index = i;
-                String screen = extractScreenName(CHANNELS[i].url)
-                        .toLowerCase(java.util.Locale.ROOT);
-                final String photoUrl = photos.get(screen);
-                final String realName = names.get(screen);
-                if (realName != null && !realName.isEmpty()) {
+                int found = -1;
+                for (int c = 0; c < CHANNELS.length; c++) {
+                    if (extractScreenName(CHANNELS[c].url)
+                            .toLowerCase(java.util.Locale.ROOT).equals(screen)) {
+                        found = c;
+                        break;
+                    }
+                }
+                if (found < 0) continue;
+                final int index = found;
+
+                if (!realName.isEmpty()) {
                     postToUi(() -> titles[index].setText(realName));
                 }
-                if (photoUrl == null || photoUrl.isEmpty()) continue;
+
+                // сеть только если в кэше ещё нет
                 final Bitmap bitmap = loadAvatarCached(screen, photoUrl);
-                if (bitmap == null) continue;
-                postToUi(() -> {
-                    avatars[index].setImageBitmap(bitmap);
-                    avatars[index].setBackground(null); // убрать серый круг
-                });
+                if (bitmap != null) {
+                    postToUi(() -> {
+                        avatars[index].setImageBitmap(bitmap);
+                        avatars[index].setBackground(null);
+                    });
+                }
             }
         } catch (Exception ignored) {
-            // оставляем серые placeholder
+            // кэш уже показали выше
         }
     });
 }
