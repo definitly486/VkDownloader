@@ -27,6 +27,8 @@ public final class ChannelBrowserActivity extends Activity {
 
     private GeckoSession session;
     private GeckoView geckoView;
+    private Button backButton;
+    private boolean canGoBack;
 
     public static void start(Context context, String url, String title) {
         Intent intent = new Intent(context, ChannelBrowserActivity.class);
@@ -60,11 +62,12 @@ public final class ChannelBrowserActivity extends Activity {
         toolbar.setGravity(Gravity.CENTER_VERTICAL);
         toolbar.setPadding(padding, padding, padding, padding);
 
-        Button back = new Button(this);
-        back.setText("‹");
-        back.setMinWidth((int) (44 * density));
-        back.setOnClickListener(v -> {
-            if (session != null) session.goBack();
+        backButton = new Button(this);
+        backButton.setText("‹");
+        backButton.setMinWidth((int) (44 * density));
+        backButton.setEnabled(false);
+        backButton.setOnClickListener(v -> {
+            if (session != null && canGoBack) session.goBack();
         });
 
         TextView pageTitle = new TextView(this);
@@ -73,7 +76,7 @@ public final class ChannelBrowserActivity extends Activity {
         pageTitle.setTextSize(16);
         pageTitle.setSingleLine(true);
         pageTitle.setGravity(Gravity.CENTER_VERTICAL);
-        toolbar.addView(back);
+        toolbar.addView(backButton);
 
         LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
@@ -105,6 +108,13 @@ public final class ChannelBrowserActivity extends Activity {
         if (runtime == null) runtime = GeckoRuntime.create(this);
         session = new GeckoSession();
         session.setContentDelegate(new GeckoSession.ContentDelegate() {});
+        session.setNavigationDelegate(new GeckoSession.NavigationDelegate() {
+            @Override
+            public void onCanGoBack(GeckoSession current, boolean value) {
+                canGoBack = value;
+                runOnUiThread(() -> backButton.setEnabled(value));
+            }
+        });
         session.setProgressDelegate(new GeckoSession.ProgressDelegate() {
             @Override
             public void onPageStart(GeckoSession current, String pageUrl) {
@@ -123,7 +133,7 @@ public final class ChannelBrowserActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (session != null) {
+        if (session != null && canGoBack) {
             session.goBack();
         } else {
             super.onBackPressed();
