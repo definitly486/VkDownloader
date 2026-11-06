@@ -59,6 +59,11 @@ public final class LiveChannelsView extends LinearLayout {
     private final LinearLayout content;
     private final OnVideoClickListener listener;
 
+    // ↓ сюда
+    private static final long AVATAR_CACHE_TTL_MS = 7L * 24 * 60 * 60 * 1000; // 7 дней
+    private static final java.util.Map<String, Bitmap> avatarMemCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     public LiveChannelsView(Context context, OnVideoClickListener listener) {
         super(context);
         this.listener = listener;
@@ -181,7 +186,7 @@ private void loadChannelAvatars(final ImageView[] avatars, final TextView[] titl
                     postToUi(() -> titles[index].setText(realName));
                 }
                 if (photoUrl == null || photoUrl.isEmpty()) continue;
-                final Bitmap bitmap = fetchBitmap(photoUrl);
+                final Bitmap bitmap = loadAvatarCached(screen, photoUrl);
                 if (bitmap == null) continue;
                 postToUi(() -> {
                     avatars[index].setImageBitmap(bitmap);
@@ -895,6 +900,53 @@ private static boolean isLiveVideo(JSONObject video) {
             } finally { c.disconnect(); }
         } catch (Exception ignored) { return null; }
     }
+
+
+/** Ключ: screen_name канала, например "36nfl" */
+private File avatarCacheFile(String screenName) {
+    File dir = new File(getContext().getCacheDir(), "channel_avatars");
+    if (!dir.exists()) dir.mkdirs();
+    return new File(dir, screenName.toLowerCase(java.util.Locale.ROOT) + ".jpg");
+}
+
+private Bitmap loadAvatarCached(String screenName, String photoUrl) {
+    if (screenName == null || screenName.isEmpty()) return null;
+    String key = screenName.toLowerCase(java.util.Locale.ROOT);
+
+    // 1) память
+    Bitmap mem = avatarMemCache.get(key);
+    if (mem != null && !mem.isRecycled()) return mem;
+
+    // 2) диск
+    File file = avatarCacheFile(key);
+    if (file.exists()
+            && System.currentTimeMillis() - file.lastModified() < AVATAR_CACHE_TTL_MS) {
+        try {
+            Bitmap disk = BitmapFactory.decodeFile(file.getAbsolutePath());
+            if (disk != null) {
+                avatarMemCache.put(key, disk);
+                return disk;
+            }
+        } catch (Exception ignored) { }
+    }
+
+    // 3) сеть → сохранить
+    if (photoUrl == null || photoUrl.isEmpty()) return null;
+    Bitmap net = fetchBitmap(photoUrl);
+    if (net == null) return null;
+    avatarMemCache.put(key, net);
+    try {
+        java.io.FileOutputStream out = new java.io.FileOutputStream(file);
+        try {
+            net.compress(Bitmap.CompressFormat.JPEG, 90, out);
+        } finally {
+            out.close();
+        }
+    } catch (Exception ignored) { }
+    return net;
+}
+
+
 
     private void postToUi(Runnable action) { if (getHandler() != null) getHandler().post(action); }
 
