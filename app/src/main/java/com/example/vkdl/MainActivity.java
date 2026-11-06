@@ -137,6 +137,8 @@ public class MainActivity extends Activity {
 
         Button videoTab = new Button(this);
         videoTab.setText("Видео");
+        Button searchTab = new Button(this);
+        searchTab.setText("Поиск");
         Button liveTab = new Button(this);
         liveTab.setText("Live");
 
@@ -149,6 +151,13 @@ public class MainActivity extends Activity {
         mainPage.addView(cancelDownloadButton);
         mainPage.addView(status);
 
+        SearchView searchPage = new SearchView(this, (videoUrl, videoTitle) -> {
+            input.setText(videoUrl);
+            videoTab.performClick();
+            search();
+        });
+        searchPage.setVisibility(View.GONE);
+
         LiveChannelsView livePage = new LiveChannelsView(this, (videoUrl, videoTitle) -> {
             input.setText(videoUrl);
             videoTab.performClick();
@@ -157,18 +166,28 @@ public class MainActivity extends Activity {
         livePage.setVisibility(View.GONE);
 
         tabs.addView(videoTab, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        tabs.addView(searchTab, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         tabs.addView(liveTab, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         videoTab.setOnClickListener(v -> {
             mainPage.setVisibility(View.VISIBLE);
+            searchPage.setVisibility(View.GONE);
+            livePage.setVisibility(View.GONE);
+        });
+        searchTab.setOnClickListener(v -> {
+            mainPage.setVisibility(View.GONE);
+            searchPage.setVisibility(View.VISIBLE);
             livePage.setVisibility(View.GONE);
         });
         liveTab.setOnClickListener(v -> {
             mainPage.setVisibility(View.GONE);
+            searchPage.setVisibility(View.GONE);
             livePage.setVisibility(View.VISIBLE);
         });
 
         root.addView(tabs);
         root.addView(mainPage, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        root.addView(searchPage, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         root.addView(livePage, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
