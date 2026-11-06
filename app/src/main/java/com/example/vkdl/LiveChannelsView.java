@@ -357,6 +357,26 @@ public final class LiveChannelsView extends LinearLayout {
         }
     }
 
+    private static JSONObject liveApiGet(String address) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
+        try {
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(VK_TIMEOUT_MS);
+            connection.setReadTimeout(VK_TIMEOUT_MS);
+            connection.setRequestProperty("User-Agent", UA);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Referer", "https://live.vkvideo.ru/");
+            int code = connection.getResponseCode();
+            if (code == 404) return new JSONObject();
+            if (code < 200 || code >= 300) {
+                throw new IllegalStateException("VK Live API HTTP " + code);
+            }
+            return new JSONObject(readVkResponse(connection));
+        } finally {
+            connection.disconnect();
+        }
+    }
+
     private void addApiVideo(List<Video> result, Set<String> seen, JSONObject item) {
         long ownerId = item.optLong("owner_id");
         long videoId = item.optLong("id");
