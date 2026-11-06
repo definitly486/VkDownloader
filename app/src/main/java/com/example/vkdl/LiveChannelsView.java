@@ -426,66 +426,6 @@ public final class LiveChannelsView extends LinearLayout {
         return "";
     }
 
-    private static String extractScreenName(String channelUrl) {
-        Matcher matcher = Pattern.compile("@([^/?#]+)").matcher(channelUrl);
-        if (!matcher.find()) throw new IllegalArgumentException("В ссылке не найдено имя канала");
-        return matcher.group(1);
-    }
-
-    private static String videoImage(JSONObject video) {
-        org.json.JSONArray images = video.optJSONArray("image");
-        String best = "";
-        int bestWidth = -1;
-        if (images != null) {
-            for (int i = 0; i < images.length(); i++) {
-                JSONObject image = images.optJSONObject(i);
-                if (image == null) continue;
-                String url = image.optString("url", "");
-                int width = image.optInt("width");
-                if (!url.isEmpty() && width > bestWidth && width <= 800) {
-                    best = url;
-                    bestWidth = width;
-                }
-            }
-            if (best.isEmpty()) {
-                for (int i = 0; i < images.length(); i++) {
-                    JSONObject image = images.optJSONObject(i);
-                    if (image != null && !image.optString("url", "").isEmpty()) {
-                        best = image.optString("url");
-                        break;
-                    }
-                }
-            }
-        }
-        if (!best.isEmpty()) return best;
-        String[] fields = {"first_frame", "photo_800", "photo_640", "photo_320"};
-        for (String field : fields) {
-            String value = video.optString(field, "");
-            if (value.startsWith("http")) return value;
-        }
-        return "";
-    }
-
-    private static JSONObject callVkApi(String method, String params) throws Exception {
-        for (int attempt = 0; attempt < 2; attempt++) {
-            String token = getAnonymousToken();
-            String address = "https://api.vk.com/method/" + method + "?v="
-                    + VK_API_VERSION + "&" + params + "&access_token="
-                    + android.net.Uri.encode(token);
-            JSONObject root = vkGetJson(address);
-            JSONObject error = root.optJSONObject("error");
-            if (error == null) return root;
-            int code = error.optInt("error_code");
-            if (code == 5 && attempt == 0) {
-                clearAnonymousToken();
-                continue;
-            }
-            throw new IllegalStateException("VK API " + method + ": "
-                    + error.optString("error_msg", "ошибка запроса") + " (код " + code + ")");
-        }
-        throw new IllegalStateException("Не удалось получить доступ к VK API");
-    }
-
     private static synchronized String getAnonymousToken() throws Exception {
         long now = System.currentTimeMillis() / 1000L;
         if (anonymousToken != null && now + 60 < tokenExpiresAt) return anonymousToken;
