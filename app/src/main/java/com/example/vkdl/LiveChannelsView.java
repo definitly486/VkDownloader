@@ -315,64 +315,45 @@ public final class LiveChannelsView extends LinearLayout {
 
     private void addCurrentLiveStream(List<Video> result, Set<String> seen,
                                       String channelUrl) throws Exception {
-        String address = "https://api.live.vkvideo.ru/v1/channel?channel_url="
-                + android.net.Uri.encode(channelUrl);
+        String channelName = extractScreenName(channelUrl);
+        // Correct VK Video Live endpoint (same endpoint used by Streamlink):
+        // /v1/blog/{channel_name}/public_video_stream
+        String address = "https://api.live.vkvideo.ru/v1/blog/"
+                + android.net.Uri.encode(channelName) + "/public_video_stream";
         JSONObject root = liveApiGet(address);
-        JSONObject data = root.optJSONObject("data");
-        if (data == null) return;
+        org.json.JSONArray streams = root.optJSONArray("data");
+        if (streams == null || streams.length() == 0) return;
 
-        JSONObject stream = data.optJSONObject("stream");
-        if (stream == null || stream.optString("status", "online").equalsIgnoreCase("offline")
-                || stream.optLong("ended_at", 0) > 0) {
-            org.json.JSONArray streams = data.optJSONArray("streams");
-            stream = null;
-            if (streams != null) {
-                for (int i = 0; i < streams.length(); i++) {
-                    JSONObject candidate = streams.optJSONObject(i);
-                    if (candidate != null && candidate.optLong("ended_at", 0) == 0
-                            && !candidate.optString("status", "").equalsIgnoreCase("offline")) {
-                        stream = candidate;
+        String channelTitle = clean(root.optString("title", ""), channelName);
+        for (int i = 0; i < streams.length(); i++) {
+            JSONObject stream = streams.optJSONObject(i);
+            if (stream == null) continue;
+            String liveId = stream.optString("vid", "");
+            if (liveId.isEmpty()) continue;
+
+            org.json.JSONArray urls = stream.optJSONArray("playerUrls");
+            boolean hasLiveHls = false;
+            if (urls != null) {
+                for (int j = 0; j < urls.length(); j++) {
+                    JSONObject player = urls.optJSONObject(j);
+                    if (player != null
+                            && "live_hls".equalsIgnoreCase(player.optString("type", ""))
+                            && !player.optString("url", "").isEmpty()) {
+                        hasLiveHls = true;
                         break;
                     }
                 }
             }
-        }
-        if (stream == null || stream.optLong("ended_at", 0) > 0) return;
+            if (!hasLiveHls) continue;
 
-        JSONObject vkVideo = stream.optJSONObject("vk_video");
-        String id = "";
-        if (vkVideo != null) {
-            String ownerId = vkVideo.optString("owner_id", "");
-            String videoId = vkVideo.optString("video_id", "");
-            if (!ownerId.isEmpty() && !videoId.isEmpty()) id = ownerId + "_" + videoId;
-        }
-        if (id.isEmpty()) id = stream.optString("video_id", "");
-        if (id.isEmpty()) return;
-        String key = id.replace('_', ':');
-        if (!seen.add(key)) return;
-
-        String title = clean(stream.optString("title", ""), "Прямой эфир");
-        String image = stream.optString("preview_url", "");
-        result.add(new Video(id, title, image, true, "https://vkvideo.ru/video" + id));
-    }
-
-    private static JSONObject liveApiGet(String address) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
-        try {
-            connection.setInstanceFollowRedirects(false);
-            connection.setConnectTimeout(VK_TIMEOUT_MS);
-            connection.setReadTimeout(VK_TIMEOUT_MS);
-            connection.setRequestProperty("User-Agent", UA);
-            connection.setRequestProperty("Accept", "application/json");
-            connection.setRequestProperty("Referer", "https://vkvideo.ru/");
-            int code = connection.getResponseCode();
-            if (code == 404) return new JSONObject();
-            if (code < 200 || code >= 300) {
-                throw new IllegalStateException("VK Live API HTTP " + code);
-            }
-            return new JSONObject(readVkResponse(connection));
-        } finally {
-            connection.disconnect();
+            String key = "live:" + channelName.toLowerCase(java.util.Locale.ROOT);
+            if (!seen.add(key)) continue;
+            String title = clean(channelTitle, "Прямой эфир " + channelName);
+            // The Live API returns a stream id, not a VK Video owner_id_video_id.
+            // Keep the channel URL as the click target; do not fabricate a VK video id.
+            result.add(new Video(liveId, title, "", true,
+                    "https://live.vkvideo.ru/" + channelName));
+            break;
         }
     }
 
