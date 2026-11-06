@@ -288,9 +288,9 @@ public final class LiveChannelsView extends LinearLayout {
     }
 
     private static String firstImage(String text) {
-        Matcher m = Pattern.compile("https?:\\?/\\?/[^\\\"'<> ]+?\\.(?:jpg|jpeg|png|webp)(?:\\?[^\\\"'<> ]*)?",
+        Matcher m = Pattern.compile("https?://[^\\s\\\"'<>]+?\\.(?:jpg|jpeg|png|webp)(?:\\?[^\\s\\\"'<>]*)?",
                 Pattern.CASE_INSENSITIVE).matcher(text);
-        if (m.find()) return m.group().replace("\\/", "/");
+        if (m.find()) return m.group();
         return null;
     }
 
