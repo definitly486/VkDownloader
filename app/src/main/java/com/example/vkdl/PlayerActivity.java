@@ -3,7 +3,8 @@ package com.example.vkdl;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
-import android.content.ComponentName;
+import android.content.ServiceConnection;
+import android.os.IBinder;
 import android.content.pm.ActivityInfo;
 import android.graphics.Color;
 import android.graphics.SurfaceTexture;
@@ -33,9 +34,7 @@ import androidx.media3.common.MediaItem;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
-import androidx.media3.session.MediaController;
-import androidx.media3.session.SessionToken;
-import com.google.common.util.concurrent.ListenableFuture;
+
 
 /**
  * Встроенный плеер без media3-ui: TextureView + свои кнопки.
@@ -56,8 +55,36 @@ public class PlayerActivity extends Activity implements TextureView.SurfaceTextu
         ctx.startActivity(i);
     }
 
-    private MediaController player;
-    private ListenableFuture<MediaController> controllerFuture;
+    private androidx.media3.exoplayer.ExoPlayer player;
+    private PlaybackService playbackService;
+    private boolean serviceBound;
+    private final ServiceConnection playbackConnection = new ServiceConnection() {
+        @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+            playbackService = ((PlaybackService.LocalBinder) binder).getService();
+            player = playbackService.getPlayer();
+            player.addListener(new Player.Listener() {
+                @Override public void onPlaybackStateChanged(int state) {
+                    buffering.setVisibility(state == Player.STATE_BUFFERING ? View.VISIBLE : View.GONE);
+                    updatePlayerControls();
+                }
+                @Override public void onIsPlayingChanged(boolean playing) { updatePlayerControls(); }
+                @Override public void onPlayerError(PlaybackException error) {
+                    Toast.makeText(PlayerActivity.this,
+                            "Ошибка: " + error.getErrorCodeName() + "\\n" + error.getMessage(),
+                            Toast.LENGTH_LONG).show();
+                }
+            });
+            if (surface != null) player.setVideoSurface(surface);
+            updatePlayerControls();
+            ui.removeCallbacks(updateProgress);
+            ui.post(updateProgress);
+        }
+        @Override public void onServiceDisconnected(ComponentName name) {
+            player = null;
+            playbackService = null;
+            serviceBound = false;
+        }
+    };
     private TextureView textureView;
     private Surface surface;
     private AudioManager audioManager;
@@ -223,35 +250,10 @@ public class PlayerActivity extends Activity implements TextureView.SurfaceTextu
 
         root.post(this::enterFullscreen);
 
-        /* PLAYBACK_SERVICE_CONNECT */
         if (hasNewPlayback) PlaybackService.startPlayback(this, url, title, isHls);
-        SessionToken token = new SessionToken(this,
-                new ComponentName(this, PlaybackService.class));
-        controllerFuture = new MediaController.Builder(this, token).buildAsync();
-        controllerFuture.addListener(() -> {
-            try {
-                player = controllerFuture.get();
-                player.addListener(new Player.Listener() {
-                    @Override public void onPlaybackStateChanged(int state) {
-                        buffering.setVisibility(state == Player.STATE_BUFFERING ? View.VISIBLE : View.GONE);
-                        updatePlayerControls();
-                    }
-                    @Override public void onIsPlayingChanged(boolean playing) { updatePlayerControls(); }
-                    @Override public void onPlayerError(PlaybackException error) {
-                        Toast.makeText(PlayerActivity.this,
-                                "Ошибка: " + error.getErrorCodeName() + "\\n" + error.getMessage(),
-                                Toast.LENGTH_LONG).show();
-                    }
-                });
-                if (surface != null) player.setVideoSurface(surface);
-                updatePlayerControls();
-                ui.removeCallbacks(updateProgress);
-                ui.post(updateProgress);
-            } catch (Exception e) {
-                Toast.makeText(PlayerActivity.this, "Не удалось подключить плеер: " + e.getMessage(),
-                        Toast.LENGTH_LONG).show();
-            }
-        }, command -> ui.post(command));
+        else PlaybackService.startService(this);
+        Intent serviceIntent = new Intent(this, PlaybackService.class);
+        serviceBound = bindService(serviceIntent, playbackConnection, Context.BIND_AUTO_CREATE);
         ui.post(updateProgress);
     }
 
@@ -469,14 +471,13 @@ public class PlayerActivity extends Activity implements TextureView.SurfaceTextu
     protected void onDestroy() {
         ui.removeCallbacks(updateProgress);
         btnFs.removeCallbacks(hideChrome);
-        if (player != null) {
-            player.clearVideoSurface();
-            player = null;
+        if (player != null) player.clearVideoSurface();
+        if (serviceBound) {
+            unbindService(playbackConnection);
+            serviceBound = false;
         }
-        if (controllerFuture != null) {
-            MediaController.releaseFuture(controllerFuture);
-            controllerFuture = null;
-        }
+        player = null;
+        playbackService = null;
         if (surface != null) {
             surface.release();
             surface = null;
