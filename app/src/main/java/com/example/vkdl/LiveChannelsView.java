@@ -266,6 +266,7 @@ public final class LiveChannelsView extends LinearLayout {
         JSONObject first = vkSearchPage(screenName);
         List<JSONObject> firstItems = pageVideos(first);
         if (firstItems.isEmpty()) {
+            if (!result.isEmpty()) return result;
             throw new IllegalStateException("VK Video не нашёл публичные ролики по имени канала @" + screenName);
         }
 
@@ -278,6 +279,7 @@ public final class LiveChannelsView extends LinearLayout {
                     ? ownerCounts.get(ownerId) + 1 : 1);
         }
         if (ownerCounts.isEmpty()) {
+            if (!result.isEmpty()) return result;
             throw new IllegalStateException("VK Video вернул результаты без ID владельца");
         }
         long targetOwner = 0;
