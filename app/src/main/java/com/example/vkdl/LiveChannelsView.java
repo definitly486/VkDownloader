@@ -7,6 +7,7 @@ import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
 import android.view.View;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -19,6 +20,8 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -200,10 +203,32 @@ public final class LiveChannelsView extends LinearLayout {
         tile.setClickable(true);
         tile.setFocusable(true);
 
+        FrameLayout preview = new FrameLayout(getContext());
         ImageView cover = new ImageView(getContext());
         cover.setBackgroundColor(Color.rgb(225, 230, 238));
         cover.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        tile.addView(cover, new LayoutParams(LayoutParams.MATCH_PARENT, dp(112)));
+        preview.addView(cover, new FrameLayout.LayoutParams(
+                LayoutParams.MATCH_PARENT, dp(112)));
+
+        if (video.live) {
+            TextView liveBadge = new TextView(getContext());
+            liveBadge.setText(" LIVE ");
+            liveBadge.setTextSize(11);
+            liveBadge.setTextColor(Color.WHITE);
+            liveBadge.setTypeface(null, android.graphics.Typeface.BOLD);
+            liveBadge.setGravity(Gravity.CENTER);
+            GradientDrawable badgeBackground = new GradientDrawable();
+            badgeBackground.setColor(Color.rgb(220, 35, 45));
+            badgeBackground.setCornerRadius(dp(4));
+            liveBadge.setBackground(badgeBackground);
+            liveBadge.setPadding(dp(5), dp(3), dp(5), dp(3));
+            FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(
+                    LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP | Gravity.START);
+            badgeParams.setMargins(dp(6), dp(6), 0, 0);
+            preview.addView(liveBadge, badgeParams);
+        }
+        tile.addView(preview, new LayoutParams(LayoutParams.MATCH_PARENT, dp(112)));
 
         TextView title = new TextView(getContext());
         title.setText(video.title);
@@ -270,6 +295,14 @@ public final class LiveChannelsView extends LinearLayout {
             if (cursor == null) break;
             page = vkSectionPage(cursor[0], cursor[1]);
         }
+        // VK marks live broadcasts with the optional "live" property.
+        // Keep the original order inside each group, but place active broadcasts first.
+        Collections.sort(result, new Comparator<Video>() {
+            @Override public int compare(Video left, Video right) {
+                if (left.live == right.live) return 0;
+                return left.live ? -1 : 1;
+            }
+        });
         return result;
     }
 
@@ -282,8 +315,27 @@ public final class LiveChannelsView extends LinearLayout {
         String accessKey = item.optString("access_key", "");
         String fullId = key + (accessKey.isEmpty() ? "" : "_" + accessKey);
         String title = clean(item.optString("title", ""), "Видео " + key);
-        result.add(new Video(fullId, title, videoImage(item),
+        result.add(new Video(fullId, title, videoImage(item), isLiveVideo(item),
                 "https://vkvideo.ru/video" + fullId));
+    }
+
+    /**
+     * VK API describes live broadcasts by the optional "live" property
+     * (BasePropertyExists). It may be represented as an object or a scalar
+     * depending on the API response version.
+     */
+    private static boolean isLiveVideo(JSONObject video) {
+        if (!video.has("live") || video.isNull("live")) return false;
+        Object value = video.opt("live");
+        if (value instanceof Boolean) return (Boolean) value;
+        if (value instanceof Number) return ((Number) value).intValue() != 0;
+        if (value instanceof String) {
+            String text = ((String) value).trim();
+            return !text.isEmpty() && !"0".equals(text)
+                    && !"false".equalsIgnoreCase(text);
+        }
+        // For BasePropertyExists VK returns an empty object when the flag is set.
+        return value instanceof JSONObject;
     }
 
     private static List<JSONObject> pageVideos(JSONObject response) {
@@ -572,8 +624,13 @@ public final class LiveChannelsView extends LinearLayout {
 
     private static final class Video {
         final String id, title, image, url;
-        Video(String id, String title, String image, String url) {
-            this.id = id; this.title = title; this.image = image; this.url = url;
+        final boolean live;
+        Video(String id, String title, String image, boolean live, String url) {
+            this.id = id;
+            this.title = title;
+            this.image = image;
+            this.live = live;
+            this.url = url;
         }
     }
 }
