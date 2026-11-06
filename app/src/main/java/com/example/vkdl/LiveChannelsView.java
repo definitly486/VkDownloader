@@ -255,57 +255,109 @@ public final class LiveChannelsView extends LinearLayout {
     private static String anonymousToken;
     private static long tokenExpiresAt;
 
-    private List<Video> scanVideos(String channelUrl) throws Exception {
+   private List<Video> scanVideos(String channelUrl) throws Exception {
     String screenName = extractScreenName(channelUrl);
     List<Video> result = new ArrayList<>();
     Set<String> seen = new HashSet<>();
 
-    // Старый Live API (для @каналов на live.vkvideo.ru) — оставляем
-    addCurrentLiveStream(result, seen, channelUrl);
-
-    JSONObject first = vkSearchPage(screenName);
-    List<JSONObject> firstItems = pageVideos(first);
-    if (firstItems.isEmpty()) {
-        if (!result.isEmpty()) return prioritizeLive(result);
-        throw new IllegalStateException("VK Video не нашёл публичные ролики по имени канала @" + screenName);
+    // 1) Классический Live API (live.vkvideo.ru/@name) — молча, если пусто
+    try {
+        addCurrentLiveStream(result, seen, channelUrl);
+    } catch (Exception ignored) {
+        // не live-блог — нормально для групп
     }
 
-    java.util.Map<Long, Integer> ownerCounts = new java.util.LinkedHashMap<>();
-    for (JSONObject item : firstItems) {
-        long ownerId = item.optLong("owner_id");
-        if (ownerId != 0) {
-            ownerCounts.put(ownerId, ownerCounts.containsKey(ownerId)
-                    ? ownerCounts.get(ownerId) + 1 : 1);
+    // 2) Основной путь для групп/каналов VK Video: owner_id → video.get
+    Long ownerId = resolveOwnerId(screenName);
+    if (ownerId != null) {
+        addOwnerVideos(result, seen, ownerId);
+    }
+
+    // 3) Каталог-поиск — доп. ролики (если video.get пуст или мало)
+    try {
+        JSONObject first = vkSearchPage(screenName);
+        List<JSONObject> firstItems = pageVideos(first);
+        long targetOwner = ownerId != null ? ownerId : 0L;
+        if (targetOwner == 0 && !firstItems.isEmpty()) {
+            java.util.Map<Long, Integer> ownerCounts = new java.util.LinkedHashMap<>();
+            for (JSONObject item : firstItems) {
+                long oid = item.optLong("owner_id");
+                if (oid != 0) {
+                    ownerCounts.put(oid, ownerCounts.containsKey(oid)
+                            ? ownerCounts.get(oid) + 1 : 1);
+                }
+            }
+            int best = 0;
+            for (java.util.Map.Entry<Long, Integer> e : ownerCounts.entrySet()) {
+                if (e.getValue() > best) {
+                    targetOwner = e.getKey();
+                    best = e.getValue();
+                }
+            }
         }
-    }
-    if (ownerCounts.isEmpty()) {
-        if (!result.isEmpty()) return prioritizeLive(result);
-        throw new IllegalStateException("VK Video вернул результаты без ID владельца");
-    }
-    long targetOwner = 0;
-    int ownerCount = 0;
-    for (java.util.Map.Entry<Long, Integer> entry : ownerCounts.entrySet()) {
-        if (entry.getValue() > ownerCount) {
-            targetOwner = entry.getKey();
-            ownerCount = entry.getValue();
+        if (targetOwner != 0) {
+            JSONObject page = first;
+            for (int pageNumber = 0; pageNumber < VK_MAX_PAGES; pageNumber++) {
+                for (JSONObject item : pageVideos(page)) {
+                    if (item.optLong("owner_id") != targetOwner) continue;
+                    addApiVideo(result, seen, item);
+                }
+                if (pageNumber + 1 >= VK_MAX_PAGES) break;
+                String[] cursor = pageCursor(page);
+                if (cursor == null) break;
+                page = vkSectionPage(cursor[0], cursor[1]);
+            }
         }
+    } catch (Exception ignored) {
+        // каталог опционален, если video.get уже дал результат
     }
 
-    JSONObject page = first;
-    for (int pageNumber = 0; pageNumber < VK_MAX_PAGES; pageNumber++) {
-        for (JSONObject item : pageVideos(page)) {
-            if (item.optLong("owner_id") != targetOwner) continue;
-            addApiVideo(result, seen, item);
-        }
-        if (pageNumber + 1 >= VK_MAX_PAGES) break;
-        String[] cursor = pageCursor(page);
-        if (cursor == null) break;
-        page = vkSectionPage(cursor[0], cursor[1]);
+    if (result.isEmpty()) {
+        throw new IllegalStateException(
+                "VK Video не нашёл публичные ролики по имени канала @" + screenName);
     }
 
-    // Главное: уточняем live-статус через API, как это делает браузер
     result = markLiveFromApi(result);
     return prioritizeLive(result);
+}
+
+/** screen_name → owner_id (отрицательный для групп) */
+private static Long resolveOwnerId(String screenName) {
+    try {
+        String address = "https://api.vkvideo.ru/method/utils.resolveScreenName?v="
+                + VK_API_VERSION + "&client_id=" + VK_CLIENT_ID
+                + "&screen_name=" + android.net.Uri.encode(screenName);
+        JSONObject response = vkAuthorizedGet(address);
+        String type = response.optString("type", "");
+        long objectId = response.optLong("object_id");
+        if (objectId == 0) return null;
+        if ("group".equals(type) || "page".equals(type) || "event".equals(type)) {
+            return -objectId;
+        }
+        if ("user".equals(type)) {
+            return objectId;
+        }
+        return null;
+    } catch (Exception e) {
+        return null;
+    }
+}
+
+/** Свежие видео владельца — основной источник live для спортивных групп */
+private void addOwnerVideos(List<Video> result, Set<String> seen, long ownerId)
+        throws Exception {
+    String address = "https://api.vkvideo.ru/method/video.get?v="
+            + VK_API_VERSION + "&client_id=" + VK_CLIENT_ID
+            + "&owner_id=" + ownerId
+            + "&count=" + VK_PAGE_SIZE
+            + "&extended=0";
+    JSONObject response = vkAuthorizedGet(address);
+    org.json.JSONArray items = response.optJSONArray("items");
+    if (items == null) return;
+    for (int i = 0; i < items.length(); i++) {
+        JSONObject item = items.optJSONObject(i);
+        if (item != null) addApiVideo(result, seen, item);
+    }
 }
 
 
@@ -479,19 +531,22 @@ private static List<Video> prioritizeLive(List<Video> videos) {
      * (BasePropertyExists). It may be represented as an object or a scalar
      * depending on the API response version.
      */
-    private static boolean isLiveVideo(JSONObject video) {
-        if (!video.has("live") || video.isNull("live")) return false;
-        Object value = video.opt("live");
-        if (value instanceof Boolean) return (Boolean) value;
-        if (value instanceof Number) return ((Number) value).intValue() != 0;
-        if (value instanceof String) {
-            String text = ((String) value).trim();
-            return !text.isEmpty() && !"0".equals(text)
-                    && !"false".equalsIgnoreCase(text);
-        }
-        // For BasePropertyExists VK returns an empty object when the flag is set.
-        return value instanceof JSONObject;
+ private static boolean isLiveVideo(JSONObject video) {
+    String status = video.optString("live_status", "");
+    if ("started".equalsIgnoreCase(status) || "waiting".equalsIgnoreCase(status)) {
+        return true;
     }
+    if (!video.has("live") || video.isNull("live")) return false;
+    Object value = video.opt("live");
+    if (value instanceof Boolean) return (Boolean) value;
+    if (value instanceof Number) return ((Number) value).intValue() != 0;
+    if (value instanceof String) {
+        String text = ((String) value).trim();
+        return !text.isEmpty() && !"0".equals(text)
+                && !"false".equalsIgnoreCase(text);
+    }
+    return value instanceof JSONObject;
+}
 
     private static List<JSONObject> pageVideos(JSONObject response) {
         List<JSONObject> result = new ArrayList<>();
