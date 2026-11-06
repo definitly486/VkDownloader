@@ -243,47 +243,187 @@ public final class LiveChannelsView extends LinearLayout {
 
     private List<Video> scanVideos(String channelUrl) throws Exception {
         String screenName = extractScreenName(channelUrl);
-        JSONObject owner = callVkApi("utils.resolveScreenName",
-                "screen_name=" + android.net.Uri.encode(screenName));
-        JSONObject resolved = owner.optJSONObject("response");
-        if (resolved == null || resolved.optLong("object_id") == 0) {
-            throw new IllegalStateException("VK не смог определить владельца канала @" + screenName);
+        JSONObject first = vkSearchPage(screenName);
+        List<JSONObject> firstItems = pageVideos(first);
+        if (firstItems.isEmpty()) {
+            throw new IllegalStateException("VK Video не нашёл публичные ролики по имени канала @" + screenName);
         }
 
-        long ownerId = resolved.optLong("object_id");
-        if ("group".equalsIgnoreCase(resolved.optString("type"))) ownerId = -ownerId;
+        // Anonymous VK Video API exposes catalog search and section pagination.
+        // Keep only the most frequent owner returned for this channel-handle query.
+        java.util.Map<Long, Integer> ownerCounts = new java.util.LinkedHashMap<>();
+        for (JSONObject item : firstItems) {
+            long ownerId = item.optLong("owner_id");
+            if (ownerId != 0) ownerCounts.put(ownerId, ownerCounts.containsKey(ownerId)
+                    ? ownerCounts.get(ownerId) + 1 : 1);
+        }
+        if (ownerCounts.isEmpty()) {
+            throw new IllegalStateException("VK Video вернул результаты без ID владельца");
+        }
+        long targetOwner = 0;
+        int ownerCount = 0;
+        for (java.util.Map.Entry<Long, Integer> entry : ownerCounts.entrySet()) {
+            if (entry.getValue() > ownerCount) {
+                targetOwner = entry.getKey();
+                ownerCount = entry.getValue();
+            }
+        }
 
         List<Video> result = new ArrayList<>();
         Set<String> seen = new HashSet<>();
-        for (int page = 0; page < VK_MAX_PAGES; page++) {
-            String params = "owner_id=" + ownerId + "&count=" + VK_PAGE_SIZE
-                    + "&offset=" + (page * VK_PAGE_SIZE) + "&extended=1";
-            JSONObject root = callVkApi("video.get", params);
-            JSONObject response = root.optJSONObject("response");
-            org.json.JSONArray items = response == null ? null : response.optJSONArray("items");
-            if (items == null || items.length() == 0) break;
-
-            for (int i = 0; i < items.length(); i++) {
-                JSONObject item = items.optJSONObject(i);
-                if (item == null) continue;
-                long videoOwner = item.optLong("owner_id", ownerId);
-                long videoId = item.optLong("id");
-                if (videoId == 0) continue;
-                String key = videoOwner + "_" + videoId;
-                if (!seen.add(key)) continue;
-
-                String accessKey = item.optString("access_key", "");
-                String fullId = key + (accessKey.isEmpty() ? "" : "_" + accessKey);
-                String title = clean(item.optString("title", ""), "Видео " + key);
-                String image = videoImage(item);
-                result.add(new Video(fullId, title, image,
-                        "https://vkvideo.ru/video" + fullId));
+        JSONObject page = first;
+        for (int pageNumber = 0; pageNumber < VK_MAX_PAGES; pageNumber++) {
+            for (JSONObject item : pageVideos(page)) {
+                if (item.optLong("owner_id") != targetOwner) continue;
+                addApiVideo(result, seen, item);
             }
-
-            int total = response.optInt("count", items.length());
-            if (items.length() < VK_PAGE_SIZE || (page + 1) * VK_PAGE_SIZE >= total) break;
+            if (pageNumber + 1 >= VK_MAX_PAGES) break;
+            String[] cursor = pageCursor(page);
+            if (cursor == null) break;
+            page = vkSectionPage(cursor[0], cursor[1]);
         }
         return result;
+    }
+
+    private void addApiVideo(List<Video> result, Set<String> seen, JSONObject item) {
+        long ownerId = item.optLong("owner_id");
+        long videoId = item.optLong("id");
+        if (ownerId == 0 || videoId == 0) return;
+        String key = ownerId + "_" + videoId;
+        if (!seen.add(key)) return;
+        String accessKey = item.optString("access_key", "");
+        String fullId = key + (accessKey.isEmpty() ? "" : "_" + accessKey);
+        String title = clean(item.optString("title", ""), "Видео " + key);
+        result.add(new Video(fullId, title, videoImage(item),
+                "https://vkvideo.ru/video" + fullId));
+    }
+
+    private static List<JSONObject> pageVideos(JSONObject response) {
+        List<JSONObject> result = new ArrayList<>();
+        org.json.JSONArray wrappers = response.optJSONArray("catalog_videos");
+        if (wrappers == null) return result;
+        for (int i = 0; i < wrappers.length(); i++) {
+            JSONObject wrapper = wrappers.optJSONObject(i);
+            JSONObject video = wrapper == null ? null : wrapper.optJSONObject("video");
+            if (video != null) result.add(video);
+        }
+        return result;
+    }
+
+    private static String[] pageCursor(JSONObject response) {
+        JSONObject section = response.optJSONObject("section");
+        if (section == null) {
+            JSONObject catalog = response.optJSONObject("catalog");
+            org.json.JSONArray sections = catalog == null ? null : catalog.optJSONArray("sections");
+            section = sections == null ? null : sections.optJSONObject(0);
+        }
+        if (section == null) return null;
+        String id = section.optString("id", "");
+        String next = section.optString("next_from", "");
+        return id.isEmpty() || next.isEmpty() ? null : new String[]{id, next};
+    }
+
+    private static JSONObject vkSearchPage(String query) throws Exception {
+        String address = "https://api.vkvideo.ru/method/catalog.getVideoSearchWeb2?v="
+                + VK_API_VERSION + "&client_id=" + VK_CLIENT_ID
+                + "&count=" + VK_PAGE_SIZE + "&q=" + android.net.Uri.encode(query)
+                + "&content_type=video";
+        return vkAuthorizedGet(address);
+    }
+
+    private static JSONObject vkSectionPage(String sectionId, String nextFrom) throws Exception {
+        String address = "https://api.vkvideo.ru/method/catalog.getSection?v="
+                + VK_API_VERSION + "&client_id=" + VK_CLIENT_ID;
+        String body = "section_id=" + android.net.Uri.encode(sectionId)
+                + "&start_from=" + android.net.Uri.encode(nextFrom);
+        return vkAuthorizedPost(address, body);
+    }
+
+    private static JSONObject vkAuthorizedGet(String address) throws Exception {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            String token = getAnonymousToken();
+            JSONObject root = vkGetJson(address + "&access_token=" + android.net.Uri.encode(token));
+            JSONObject error = root.optJSONObject("error");
+            if (error == null) {
+                JSONObject response = root.optJSONObject("response");
+                if (response == null) throw new IllegalStateException("VK Video не вернул результаты");
+                return response;
+            }
+            if (isVkAuthorizationError(error) && attempt == 0) {
+                clearAnonymousToken();
+                continue;
+            }
+            throw new IllegalStateException("VK Video: "
+                    + error.optString("error_msg", "ошибка поиска"));
+        }
+        throw new IllegalStateException("Не удалось обновить анонимную сессию VK");
+    }
+
+    private static JSONObject vkAuthorizedPost(String address, String body) throws Exception {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            String token = getAnonymousToken();
+            JSONObject root = vkPostJson(address,
+                    body + "&access_token=" + android.net.Uri.encode(token));
+            JSONObject error = root.optJSONObject("error");
+            if (error == null) {
+                JSONObject response = root.optJSONObject("response");
+                if (response == null) throw new IllegalStateException("VK Video не вернул страницу");
+                return response;
+            }
+            if (isVkAuthorizationError(error) && attempt == 0) {
+                clearAnonymousToken();
+                continue;
+            }
+            throw new IllegalStateException("VK Video: "
+                    + error.optString("error_msg", "ошибка загрузки страницы"));
+        }
+        throw new IllegalStateException("Не удалось обновить анонимную сессию VK");
+    }
+
+    private static boolean isVkAuthorizationError(JSONObject error) {
+        return error.optInt("error_code") == 5
+                || error.optString("error_msg").toLowerCase(java.util.Locale.ROOT)
+                .contains("authorization failed");
+    }
+
+    private static String extractScreenName(String channelUrl) {
+        Matcher matcher = Pattern.compile("@([^/?#]+)").matcher(channelUrl);
+        if (!matcher.find()) throw new IllegalArgumentException("В ссылке не найдено имя канала");
+        return matcher.group(1);
+    }
+
+    private static String videoImage(JSONObject video) {
+        org.json.JSONArray images = video.optJSONArray("image");
+        String best = "";
+        int bestWidth = -1;
+        if (images != null) {
+            for (int i = 0; i < images.length(); i++) {
+                JSONObject image = images.optJSONObject(i);
+                if (image == null) continue;
+                String url = image.optString("url", "");
+                int width = image.optInt("width");
+                if (!url.isEmpty() && width > bestWidth && width <= 800) {
+                    best = url;
+                    bestWidth = width;
+                }
+            }
+            if (best.isEmpty()) {
+                for (int i = 0; i < images.length(); i++) {
+                    JSONObject image = images.optJSONObject(i);
+                    if (image != null && !image.optString("url", "").isEmpty()) {
+                        best = image.optString("url");
+                        break;
+                    }
+                }
+            }
+        }
+        if (!best.isEmpty()) return best;
+        String[] fields = {"first_frame", "photo_800", "photo_640", "photo_320"};
+        for (String field : fields) {
+            String value = video.optString(field, "");
+            if (value.startsWith("http")) return value;
+        }
+        return "";
     }
 
     private static String extractScreenName(String channelUrl) {
@@ -395,20 +535,48 @@ public final class LiveChannelsView extends LinearLayout {
     private static JSONObject vkGetJson(String address) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
         try {
-            connection.setInstanceFollowRedirects(false);
-            connection.setConnectTimeout(VK_TIMEOUT_MS);
-            connection.setReadTimeout(VK_TIMEOUT_MS);
-            connection.setRequestProperty("User-Agent", UA);
-            connection.setRequestProperty("Accept", "application/json");
-            connection.setRequestProperty("Accept-Language", "ru-RU,ru;q=0.9");
+            configureVkConnection(connection);
             int code = connection.getResponseCode();
             if (code < 200 || code >= 300) {
-                throw new IllegalStateException("VK API HTTP " + code + " (redirects disabled)");
+                throw new IllegalStateException("VK Video HTTP " + code + " (redirects disabled)");
             }
             return new JSONObject(readVkResponse(connection));
         } finally {
             connection.disconnect();
         }
+    }
+
+    private static JSONObject vkPostJson(String address, String body) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
+        try {
+            configureVkConnection(connection);
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+            connection.setRequestProperty("Origin", "https://vkvideo.ru");
+            connection.setRequestProperty("Referer", "https://vkvideo.ru/");
+            byte[] bytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            connection.setFixedLengthStreamingMode(bytes.length);
+            try (java.io.OutputStream output = connection.getOutputStream()) {
+                output.write(bytes);
+            }
+            int code = connection.getResponseCode();
+            if (code < 200 || code >= 300) {
+                throw new IllegalStateException("VK Video HTTP " + code + " (redirects disabled)");
+            }
+            return new JSONObject(readVkResponse(connection));
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private static void configureVkConnection(HttpURLConnection connection) {
+        connection.setInstanceFollowRedirects(false);
+        connection.setConnectTimeout(VK_TIMEOUT_MS);
+        connection.setReadTimeout(VK_TIMEOUT_MS);
+        connection.setRequestProperty("User-Agent", UA);
+        connection.setRequestProperty("Accept", "application/json,*/*");
+        connection.setRequestProperty("Accept-Language", "ru-RU,ru;q=0.9");
     }
 
     private static String readVkResponse(HttpURLConnection connection) throws Exception {
