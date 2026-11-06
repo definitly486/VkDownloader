@@ -29,7 +29,7 @@ import java.util.regex.Pattern;
 
 /**
  * Список каналов и плитки опубликованных в них видео.
- * Страницы VK загружаются обычным HTTP-запросом; браузерный движок не используется.
+ * Использует анонимную VK API-сессию; браузерный движок и HTML-сканирование не используются.
  */
 public final class LiveChannelsView extends LinearLayout {
     private static final String UA =
