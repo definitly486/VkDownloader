@@ -3,14 +3,14 @@ package com.example.vkdl;
 import android.app.PendingIntent;
 import android.content.Intent;
 import android.os.Build;
+
+import androidx.media3.common.AudioAttributes;
+import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
-import androidx.media3.common.MimeTypes;
+import androidx.media3.common.MediaMetadata;
 import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.exoplayer.ExoPlayer;
-import androidx.media3.exoplayer.hls.HlsMediaSource;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
-import androidx.media3.exoplayer.source.MediaSource;
-import androidx.media3.exoplayer.source.ProgressiveMediaSource;
 import androidx.media3.session.MediaSession;
 import androidx.media3.session.MediaSessionService;
 
@@ -51,11 +51,20 @@ public class PlaybackService extends MediaSessionService {
                     put("Accept", "*/*");
                     put("Accept-Language", "ru,en;q=0.8");
                 }});
+
         player = new ExoPlayer.Builder(this)
                 .setMediaSourceFactory(new DefaultMediaSourceFactory(http))
                 .build();
+        player.setAudioAttributes(
+                new AudioAttributes.Builder()
+                        .setUsage(C.USAGE_MEDIA)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                        .build(),
+                true);
+        player.setHandleAudioBecomingNoisy(true);
 
-        Intent openPlayer = new Intent(this, PlayerActivity.class);
+        Intent openPlayer = new Intent(this, PlayerActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent sessionActivity = PendingIntent.getActivity(this, 0, openPlayer,
                 PendingIntent.FLAG_UPDATE_CURRENT
                         | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0));
@@ -73,31 +82,17 @@ public class PlaybackService extends MediaSessionService {
             boolean isHls = intent.getBooleanExtra(EXTRA_IS_HLS,
                     url != null && url.contains(".m3u8"));
             if (url != null && !url.isEmpty()) {
+                MediaMetadata metadata = new MediaMetadata.Builder()
+                        .setTitle(title == null || title.isEmpty() ? "VK Video" : title)
+                        .build();
                 MediaItem.Builder item = new MediaItem.Builder()
-                        .setUri(url).setMediaId(title == null ? "VK Video" : title);
-                boolean hls = isHls || url.contains(".m3u8");
-                if (hls) item.setMimeType(MimeTypes.APPLICATION_M3U8);
-                MediaItem mediaItem = item.build();
-                MediaSource source = hls
-                        ? new HlsMediaSource.Factory(new DefaultHttpDataSource.Factory()
-                            .setUserAgent(UA).setAllowCrossProtocolRedirects(true)
-                            .setConnectTimeoutMs(15_000).setReadTimeoutMs(30_000)
-                            .setDefaultRequestProperties(new java.util.HashMap<String, String>() {{
-                                put("Referer", "https://vk.com/");
-                                put("Origin", "https://vk.com");
-                                put("Accept", "*/*");
-                                put("Accept-Language", "ru,en;q=0.8");
-                            }})).createMediaSource(mediaItem)
-                        : new ProgressiveMediaSource.Factory(new DefaultHttpDataSource.Factory()
-                            .setUserAgent(UA).setAllowCrossProtocolRedirects(true)
-                            .setConnectTimeoutMs(15_000).setReadTimeoutMs(30_000)
-                            .setDefaultRequestProperties(new java.util.HashMap<String, String>() {{
-                                put("Referer", "https://vk.com/");
-                                put("Origin", "https://vk.com");
-                                put("Accept", "*/*");
-                                put("Accept-Language", "ru,en;q=0.8");
-                            }})).createMediaSource(mediaItem);
-                player.setMediaSource(source);
+                        .setUri(url)
+                        .setMediaId(title == null ? "VK Video" : title)
+                        .setMediaMetadata(metadata);
+                if (isHls || url.contains(".m3u8")) {
+                    item.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8);
+                }
+                player.setMediaItem(item.build());
                 player.prepare();
                 player.play();
             }
