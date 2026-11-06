@@ -133,6 +133,17 @@ public final class LiveChannelsView extends LinearLayout {
         row.addView(avatar, new LayoutParams(dp(54), dp(54)));
         avatars[i] = avatar;
 
+        // Показываем уже загруженный аватар прямо при построении списка.
+        // Не ставим чтение памяти в общий executor: он может быть занят
+        // долгим сканированием предыдущего канала.
+        String avatarKey = extractScreenName(channel.url)
+                .toLowerCase(java.util.Locale.ROOT);
+        Bitmap memoryAvatar = avatarMemCache.get(avatarKey);
+        if (memoryAvatar != null && !memoryAvatar.isRecycled()) {
+            avatar.setImageBitmap(memoryAvatar);
+            avatar.setBackground(null);
+        }
+
         LinearLayout labels = new LinearLayout(getContext());
         labels.setOrientation(VERTICAL);
         labels.setGravity(Gravity.CENTER_VERTICAL);
