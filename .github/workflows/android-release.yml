@@ -62,15 +62,14 @@ jobs:
       - name: Build release APK
         run: ./gradlew --no-daemon --stacktrace assembleRelease
 
-      - name: Build debug APK
-        run: ./gradlew --no-daemon assembleDebug
+ 
 
       - name: Prepare release assets
         shell: bash
         run: |
           mkdir -p release-assets
           cp app/build/outputs/apk/release/*.apk release-assets/ 2>/dev/null || true
-          cp app/build/outputs/apk/debug/*.apk release-assets/ 2>/dev/null || true
+          
           if [ "$STABLE_SIGNING" != "true" ]; then
             mv release-assets/app-release.apk release-assets/app-release-unsigned.apk 2>/dev/null || true
           fi
@@ -96,7 +95,7 @@ jobs:
             Branch: `${{ github.ref_name }}`
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-            If `app-release-unsigned.apk` is present, configure repository signing secrets to publish a stable, signed release APK. The debug APK is signed with Android's debug key and is intended for testing.
+            If `app-release-unsigned.apk` is present, configure repository signing secrets to publish a stable, signed release APK.
           files: release-assets/*
           fail_on_unmatched_files: true
           make_latest: true
