@@ -442,9 +442,9 @@ private List<Video> markLiveFromApi(List<Video> videos) {
         StringBuilder ids = new StringBuilder();
         List<String> keys = new ArrayList<>();
         for (Video v : videos) {
+            if (isLiveApiEntry(v)) continue;  // Live API — не в getLiveStatus
+
             String key = v.id;
-            // пропускаем только записи Live API без owner_id_video_id
-            if (key.startsWith("live:")) continue;
             int first = key.indexOf('_');
             if (first <= 0) continue;
             int second = key.indexOf('_', first + 1);
@@ -452,7 +452,7 @@ private List<Video> markLiveFromApi(List<Video> videos) {
             if (ids.length() > 0) ids.append(',');
             ids.append(shortId);
             keys.add(shortId);
-            if (keys.size() >= 50) break; // можно больше, API принимает пачку
+            if (keys.size() >= 50) break;
         }
         if (keys.isEmpty()) return videos;
 
@@ -463,7 +463,6 @@ private List<Video> markLiveFromApi(List<Video> videos) {
         org.json.JSONArray arr = root.optJSONArray("response");
         if (arr == null) arr = root.optJSONArray("items");
         if (arr == null) {
-            // нет ответа — снимаем все live, кроме live.vkvideo.ru
             return demoteAllExceptLiveApi(videos);
         }
 
@@ -481,8 +480,8 @@ private List<Video> markLiveFromApi(List<Video> videos) {
 
         List<Video> updated = new ArrayList<>(videos.size());
         for (Video v : videos) {
-            if (v.id.startsWith("live:")) {
-                updated.add(v); // из Live API — оставляем
+            if (isLiveApiEntry(v)) {
+                updated.add(v.live ? v : new Video(v.id, v.title, v.image, true, v.url));
                 continue;
             }
             int first = v.id.indexOf('_');
@@ -497,7 +496,6 @@ private List<Video> markLiveFromApi(List<Video> videos) {
         }
         return updated;
     } catch (Exception e) {
-        // при ошибке API лучше снять сомнительные live, чем показывать ложные
         return demoteAllExceptLiveApi(videos);
     }
 }
@@ -506,8 +504,10 @@ private List<Video> markLiveFromApi(List<Video> videos) {
 private static List<Video> demoteAllExceptLiveApi(List<Video> videos) {
     List<Video> out = new ArrayList<>(videos.size());
     for (Video v : videos) {
-        if (v.live && !v.id.startsWith("live:")) {
+        if (v.live && !isLiveApiEntry(v)) {
             out.add(new Video(v.id, v.title, v.image, false, v.url));
+        } else if (isLiveApiEntry(v) && !v.live) {
+            out.add(new Video(v.id, v.title, v.image, true, v.url));
         } else {
             out.add(v);
         }
@@ -566,11 +566,18 @@ private static List<Video> prioritizeLive(List<Video> videos) {
             String title = clean(channelTitle, "Прямой эфир " + channelName);
             // The Live API returns a stream id, not a VK Video owner_id_video_id.
             // Keep the channel URL as the click target; do not fabricate a VK video id.
-            result.add(new Video(liveId, title, "", true,
-                    "https://live.vkvideo.ru/" + channelName));
+           String videoId = "live:" + channelName.toLowerCase(java.util.Locale.ROOT);
+result.add(new Video(videoId, title, "", true,
+        "https://live.vkvideo.ru/" + channelName));
             break;
         }
     }
+
+private static boolean isLiveApiEntry(Video v) {
+    return v.id != null && v.id.startsWith("live:")
+            || (v.url != null && v.url.contains("live.vkvideo.ru/"));
+}
+
 
     private static JSONObject liveApiGet(String address) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
