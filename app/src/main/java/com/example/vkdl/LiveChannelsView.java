@@ -440,10 +440,8 @@ private List<Video> markLiveFromApi(List<Video> videos) {
     if (videos.isEmpty()) return videos;
     try {
         StringBuilder ids = new StringBuilder();
-        List<String> keys = new ArrayList<>();
         for (Video v : videos) {
-            if (isLiveApiEntry(v)) continue;  // Live API — не в getLiveStatus
-
+            if (isLiveApiEntry(v)) continue;
             String key = v.id;
             int first = key.indexOf('_');
             if (first <= 0) continue;
@@ -451,20 +449,33 @@ private List<Video> markLiveFromApi(List<Video> videos) {
             String shortId = second > 0 ? key.substring(0, second) : key;
             if (ids.length() > 0) ids.append(',');
             ids.append(shortId);
-            keys.add(shortId);
-            if (keys.size() >= 50) break;
+            if (ids.toString().split(",").length >= 50) break;
         }
-        if (keys.isEmpty()) return videos;
+        if (ids.length() == 0) return videos;
 
+        // ВАЖНО: response — JSONArray, vkAuthorizedPost его ломает
+        String token = getAnonymousToken();
         String address = "https://api.vkvideo.ru/method/video.getLiveStatus?v="
                 + VK_API_VERSION + "&client_id=" + VK_CLIENT_ID;
-        String body = "video_ids=" + android.net.Uri.encode(ids.toString());
-        JSONObject root = vkAuthorizedPost(address, body);
-        org.json.JSONArray arr = root.optJSONArray("response");
-        if (arr == null) arr = root.optJSONArray("items");
-        if (arr == null) {
-            return demoteAllExceptLiveApi(videos);
+        String body = "video_ids=" + android.net.Uri.encode(ids.toString())
+                + "&access_token=" + android.net.Uri.encode(token);
+        JSONObject root = vkPostJson(address, body);
+
+        JSONObject error = root.optJSONObject("error");
+        if (error != null) {
+            if (isVkAuthorizationError(error)) {
+                clearAnonymousToken();
+                token = getAnonymousToken();
+                body = "video_ids=" + android.net.Uri.encode(ids.toString())
+                        + "&access_token=" + android.net.Uri.encode(token);
+                root = vkPostJson(address, body);
+                error = root.optJSONObject("error");
+            }
+            if (error != null) return demoteAllExceptLiveApi(videos);
         }
+
+        org.json.JSONArray arr = root.optJSONArray("response");
+        if (arr == null) return demoteAllExceptLiveApi(videos);
 
         Set<String> liveKeys = new HashSet<>();
         for (int i = 0; i < arr.length(); i++) {
