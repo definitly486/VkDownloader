@@ -360,7 +360,9 @@ public final class LiveChannelsView extends LinearLayout {
     private static JSONObject liveApiGet(String address) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
         try {
-            connection.setInstanceFollowRedirects(false);
+            // Streamlink's HTTP client follows redirects for this endpoint.
+            // VK Live may redirect API requests to its canonical host.
+            connection.setInstanceFollowRedirects(true);
             connection.setConnectTimeout(VK_TIMEOUT_MS);
             connection.setReadTimeout(VK_TIMEOUT_MS);
             connection.setRequestProperty("User-Agent", UA);
@@ -369,9 +371,16 @@ public final class LiveChannelsView extends LinearLayout {
             int code = connection.getResponseCode();
             if (code == 404) return new JSONObject();
             if (code < 200 || code >= 300) {
-                throw new IllegalStateException("VK Live API HTTP " + code);
+                throw new IllegalStateException("VK Live API HTTP " + code
+                        + " for " + connection.getURL().getHost());
             }
-            return new JSONObject(readVkResponse(connection));
+            JSONObject response = new JSONObject(readVkResponse(connection));
+            if (response.has("error")) {
+                throw new IllegalStateException("VK Live API: "
+                        + response.optString("error_description",
+                        response.optString("error", "unknown error")));
+            }
+            return response;
         } finally {
             connection.disconnect();
         }
