@@ -50,7 +50,8 @@ public final class LiveChannelsView extends LinearLayout {
             new Channel("@sportcast_nhl", "https://vkvideo.ru/@sportcast_nhl"),
             new Channel("@36hockey", "https://vkvideo.ru/@36hockey"),
             new Channel("@tennisatpwta", "https://vkvideo.ru/@tennisatpwta"),
-            new Channel("@vitalsport11", "https://vkvideo.ru/@vitalsport11")
+            new Channel("@vitalsport11", "https://vkvideo.ru/@vitalsport11"),
+              new Channel("@f1memestv", "https://vkvideo.ru/@f1memestv")
     };
 
     public interface OnVideoClickListener {
