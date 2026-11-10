@@ -92,12 +92,15 @@ public class Mp4DownloadService extends Service {
         cancelled.set(false);
         work = pool.submit(() -> {
             try {
+                DownloadProgress.send(this, "Этап 1/3 — Подготовка\nПроверка размера и поддерживаемых диапазонов HTTP…", -1, false, false);
                 download(url, name);
                 nm.notify(NOTIFICATION_ID, notification("Готово: " + name, 100, 0, 0, false));
+                DownloadProgress.send(this, "Загрузка завершена\nФайл сохранён: " + name, 100, true, false);
             } catch (Exception e) {
                 if (!cancelled.get()) {
-                    nm.notify(NOTIFICATION_ID, notification(
-                            "Ошибка: " + e.getMessage(), 0, 0, 0, false));
+                    String error = "Ошибка загрузки\n" + e.getClass().getSimpleName() + ": " + e.getMessage();
+                    nm.notify(NOTIFICATION_ID, notification(error, 0, 0, 0, false));
+                    DownloadProgress.send(this, error, -1, false, true);
                 }
             } finally {
                 stopForeground(false);
@@ -110,6 +113,7 @@ public class Mp4DownloadService extends Service {
     private void download(String url, String name) throws Exception {
         long total = probeSize(url);
         if (total <= 0) throw new IOException("Не удалось определить размер файла");
+        DownloadProgress.send(this, "Этап 1/3 — Скачивание файла\nРазмер: " + formatBytes(total) + "\nПодготовка потоков…", 0, false, false);
 
         int workers = total > 8_000_000 ? 3 : 1;
         long chunk = (total + workers - 1) / workers;
@@ -146,8 +150,12 @@ public class Mp4DownloadService extends Service {
                                     long ema = speed.get() == 0 ? instant : (long) (speed.get() * 0.65 + instant * 0.35);
                                     speed.set(ema);
                                     int pct = (int) Math.min(99, all * 100 / total);
-                                    nm.notify(NOTIFICATION_ID,
-                                            notification("Скачивание: " + name, pct, all, speed.get(), true));
+                                    String details = "Этап 1/3 — Скачивание\n" + name + "\n"
+                                            + formatBytes(all) + " / " + formatBytes(total) + " (" + pct + "%)\n"
+                                            + "Скорость: " + formatBytes(speed.get()) + "/с\n"
+                                            + "Параллельных потоков: " + workers + " · Часть " + (idx + 1) + "/" + workers;
+                                    nm.notify(NOTIFICATION_ID, notification(details, pct, all, speed.get(), true));
+                                    DownloadProgress.send(this, details, pct, false, false);
                                 }
                             });
                             last = null;
@@ -167,6 +175,7 @@ public class Mp4DownloadService extends Service {
             long sum = 0;
             for (File p : parts) sum += p.length();
             if (sum != total) throw new IOException("Размер не совпал: " + sum + " / " + total);
+            DownloadProgress.send(this, "Этап 2/3 — Сохранение\nЗагрузка данных завершена (100%).\nЗапись в папку «Загрузки»…", 0, false, false);
             save(parts, name);
         } finally {
             deleteDir(dir);
@@ -254,10 +263,29 @@ public class Mp4DownloadService extends Service {
             try (OutputStream out = getContentResolver().openOutputStream(uri, "w")) {
                 if (out == null) throw new IOException("openOutputStream");
                 byte[] buf = new byte[128 * 1024];
+                long totalBytes = 0;
+                for (File f : parts) totalBytes += f.length();
+                long copied = 0;
+                long started = SystemClock.elapsedRealtime();
+                long lastNotice = started;
                 for (File f : parts) {
                     try (FileInputStream in = new FileInputStream(f)) {
                         int n;
-                        while ((n = in.read(buf)) >= 0) out.write(buf, 0, n);
+                        while ((n = in.read(buf)) >= 0) {
+                            out.write(buf, 0, n);
+                            copied += n;
+                            long now = SystemClock.elapsedRealtime();
+                            if (now - lastNotice >= 400 || copied >= totalBytes) {
+                                int pct = totalBytes > 0 ? (int) (copied * 100 / totalBytes) : 100;
+                                long writeSpeed = copied * 1000L / Math.max(1L, now - started);
+                                String details = "Этап 2/3 — Сохранение в «Загрузки»\n"
+                                        + formatBytes(copied) + " / " + formatBytes(totalBytes) + " (" + pct + "%)\n"
+                                        + "Скорость записи: " + formatBytes(writeSpeed) + "/с";
+                                DownloadProgress.send(this, details, pct, false, false);
+                                nm.notify(NOTIFICATION_ID, notification(details, pct, copied, writeSpeed, true));
+                                lastNotice = now;
+                            }
+                        }
                     }
                 }
             }
