@@ -106,28 +106,24 @@ public class HlsDownloadService extends Service {
                 nm.notify(NOTIF_ID, notif("HLS " + label + "…", 0, true));
                 DownloadProgress.send(this, "Этап 1/4 — Подготовка видео " + label + "…\nПолучение плейлиста.", 0, false, false);
                 long startedAt = SystemClock.elapsedRealtime();
-                File videoFile = downloadPlaylist(url, (pct, done, total, bytes, elapsed) ->
-                        nm.notify(NOTIF_ID, notif(
-                                "Этап 1/4 — Видео " + label + "\nСегменты: " + done + "/" + total
-                                        + " (" + pct + "%)\nПолучено: " + formatBytes(bytes)
-                                        + " · Скорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
-                                        + " · Время: " + formatDuration(elapsed), pct, true)));
-                        DownloadProgress.send(this, "Этап 1/4 — Видео " + label + "\nСегменты: " + done + "/" + total
-                                + " (" + pct + "%)\nПолучено: " + formatBytes(bytes)
-                                + "\nСкорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
-                                + "\nВремя этапа: " + formatDuration(elapsed), pct, false, false);
+                File videoFile = downloadPlaylist(url, (pct, done, total, bytes, elapsed) -> {
+                    String details = "Этап 1/4 — Видео " + label + "\\nСегменты: " + done + "/" + total
+                            + " (" + pct + "%)\\nПолучено: " + formatBytes(bytes)
+                            + "\\nСкорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
+                            + "\\nВремя этапа: " + formatDuration(elapsed);
+                    nm.notify(NOTIF_ID, notif(details, pct, true));
+                    DownloadProgress.send(this, details, pct, false, false);
+                });
                 File audioFile = null;
                 if (audioUrl != null && !audioUrl.isEmpty()) {
-                    audioFile = downloadPlaylist(audioUrl, (pct, done, total, bytes, elapsed) ->
-                            nm.notify(NOTIF_ID, notif(
-                                    "Этап 2/4 — Аудио\nСегменты: " + done + "/" + total
-                                            + " (" + pct + "%)\nПолучено: " + formatBytes(bytes)
-                                            + " · Скорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
-                                            + " · Время: " + formatDuration(elapsed), pct, true)));
-                            DownloadProgress.send(this, "Этап 2/4 — Аудио\nСегменты: " + done + "/" + total
-                                    + " (" + pct + "%)\nПолучено: " + formatBytes(bytes)
-                                    + "\nСкорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
-                                    + "\nВремя этапа: " + formatDuration(elapsed), pct, false, false);
+                    audioFile = downloadPlaylist(audioUrl, (pct, done, total, bytes, elapsed) -> {
+                        String details = "Этап 2/4 — Аудио\\nСегменты: " + done + "/" + total
+                                + " (" + pct + "%)\\nПолучено: " + formatBytes(bytes)
+                                + "\\nСкорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
+                                + "\\nВремя этапа: " + formatDuration(elapsed);
+                        nm.notify(NOTIF_ID, notif(details, pct, true));
+                        DownloadProgress.send(this, details, pct, false, false);
+                    });
                 }
                 String outName = "vk_" + (videoId != null ? videoId : "video") + "_" + label + ".mp4";
                 File out = new File(getCacheDir(), outName);
