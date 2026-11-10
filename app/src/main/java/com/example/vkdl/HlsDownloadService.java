@@ -382,10 +382,11 @@ public class HlsDownloadService extends Service {
                 samplesWritten++;
                 long now = SystemClock.elapsedRealtime();
                 if (now - lastMuxNotice >= 1500) {
-                    nm.notify(NOTIF_ID, notif(
-                            "Этап 3/4 — Сборка MP4\nОбработано фрагментов: " + samplesWritten
-                                    + "\nВремя обработки: " + formatDuration(now - muxStarted)
-                                    + "\nИдёт объединение аудио и видео на устройстве…", 0, true));
+                    String details = "Этап 3/4 — Сборка MP4\nОбработано фрагментов: " + samplesWritten
+                            + "\nВремя обработки: " + formatDuration(now - muxStarted)
+                            + "\nИдёт объединение аудио и видео на устройстве…";
+                    nm.notify(NOTIF_ID, notif(details, 0, true));
+                    DownloadProgress.send(this, details, -1, false, false);
                     lastMuxNotice = now;
                 }
             }
