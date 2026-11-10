@@ -142,12 +142,19 @@ public class MainActivity extends Activity {
         cancelDownloadButton.setText("Отменить загрузку");
         cancelDownloadButton.setVisibility(View.GONE);
         cancelDownloadButton.setOnClickListener(v -> {
-            Intent cancel = new Intent(this, Mp4DownloadService.class)
-                    .setAction(Mp4DownloadService.ACTION_CANCEL);
-            startService(cancel);
+            if (activeDownloadId == -4L) {
+                Intent cancel = new Intent(this, HlsDownloadService.class)
+                        .setAction(HlsDownloadService.ACTION_CANCEL);
+                startService(cancel);
+            } else {
+                Intent cancel = new Intent(this, Mp4DownloadService.class)
+                        .setAction(Mp4DownloadService.ACTION_CANCEL);
+                startService(cancel);
+            }
             cancelDownloadButton.setVisibility(View.GONE);
             downloadProgress.setVisibility(View.GONE);
-            status.setText("Загрузка отменена");
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            status.setText("Отмена загрузки…");
         });
 
         status = new TextView(this);
@@ -779,7 +786,8 @@ public class MainActivity extends Activity {
         status.setText("Подготовка HLS-загрузки (" + label + ")…\nОжидание данных от сервиса.");
         downloadProgress.setVisibility(View.VISIBLE);
         downloadProgress.setIndeterminate(true);
-        cancelDownloadButton.setVisibility(View.GONE);
+        cancelDownloadButton.setVisibility(View.VISIBLE);
+        activeDownloadId = -4L;
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         Toast.makeText(this, "HLS в фоне (" + label + ")", Toast.LENGTH_LONG).show();
     }
