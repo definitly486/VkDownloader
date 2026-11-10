@@ -100,21 +100,32 @@ public class HlsDownloadService extends Service {
         }
         cancelled.set(false);
         work = pool.submit(() -> {
-            File tmp = null;
+            boolean completed = false;
             try {
                 String label = height > 0 ? height + "p" : "hls";
                 nm.notify(NOTIF_ID, notif("HLS " + label + "…", 0, true));
-                File videoFile = downloadPlaylist(url, pct ->
-                        nm.notify(NOTIF_ID, notif("Видео " + label + ": " + pct + "%", pct, true)));
+                long startedAt = SystemClock.elapsedRealtime();
+                File videoFile = downloadPlaylist(url, (pct, done, total, bytes, elapsed) ->
+                        nm.notify(NOTIF_ID, notif(
+                                "Этап 1/4 — Видео " + label + "\nСегменты: " + done + "/" + total
+                                        + " (" + pct + "%)\nПолучено: " + formatBytes(bytes)
+                                        + " · Скорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
+                                        + " · Время: " + formatDuration(elapsed), pct, true)));
                 File audioFile = null;
                 if (audioUrl != null && !audioUrl.isEmpty()) {
-                    audioFile = downloadPlaylist(audioUrl, pct ->
-                            nm.notify(NOTIF_ID, notif("Аудио: " + pct + "%", pct, true)));
+                    audioFile = downloadPlaylist(audioUrl, (pct, done, total, bytes, elapsed) ->
+                            nm.notify(NOTIF_ID, notif(
+                                    "Этап 2/4 — Аудио\nСегменты: " + done + "/" + total
+                                            + " (" + pct + "%)\nПолучено: " + formatBytes(bytes)
+                                            + " · Скорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
+                                            + " · Время: " + formatDuration(elapsed), pct, true)));
                 }
                 String outName = "vk_" + (videoId != null ? videoId : "video") + "_" + label + ".mp4";
                 File out = new File(getCacheDir(), outName);
                 if (audioFile != null) {
-                    nm.notify(NOTIF_ID, notif("Сборка mp4…", 95, true));
+                    nm.notify(NOTIF_ID, notif(
+                            "Этап 3/4 — Сборка MP4\nОбъединение видео и аудио. Это локальная обработка, "
+                                    + "скорость сети здесь уже не влияет.", 0, true));
                     muxToMp4(java.util.Arrays.asList(videoFile, audioFile), out);
                     videoFile.delete();
                     audioFile.delete();
@@ -124,6 +135,8 @@ public class HlsDownloadService extends Service {
                         out = videoFile;
                     } else {
                         try {
+                            nm.notify(NOTIF_ID, notif(
+                                    "Этап 3/4 — Подготовка MP4\nПерепаковка видеопотока без повторного скачивания.", 0, true));
                             muxToMp4(java.util.Collections.singletonList(videoFile), out);
                             videoFile.delete();
                         } catch (Exception e) {
@@ -134,15 +147,29 @@ public class HlsDownloadService extends Service {
                     }
                 }
                 String mime = out.getName().endsWith(".mp4") ? "video/mp4" : "video/mp2t";
-                saveToDownloads(out, outName, mime);
-                String check = checkMp4(new File(getCacheDir(), "x")); // noop path
+                nm.notify(NOTIF_ID, notif(
+                        "Этап 4/4 — Сохранение\nКопирование " + formatBytes(out.length())
+                                + " в папку «Загрузки»…", 0, true));
+                saveToDownloads(out, outName, mime, (copied, total) -> {
+                    int pct = total > 0 ? (int) Math.min(100, copied * 100 / total) : 0;
+                    long elapsed = Math.max(1, SystemClock.elapsedRealtime() - startedAt);
+                    nm.notify(NOTIF_ID, notif(
+                            "Этап 4/4 — Сохранение файла\n" + formatBytes(copied) + " / "
+                                    + formatBytes(total) + " (" + pct + "%)\nСкорость: "
+                                    + formatBytes(rate(copied, elapsed)) + "/с · Время: "
+                                    + formatDuration(elapsed), pct, true));
+                });
+                completed = true;
                 nm.notify(NOTIF_ID, notif("Готово: " + outName, 100, false));
             } catch (Exception e) {
                 if (!cancelled.get()) {
                     nm.notify(NOTIF_ID, notif("Ошибка: " + e.getMessage(), 0, false));
                 }
             } finally {
-                stopForeground(false);
+                // Убираем устаревший прогресс после успешного завершения.
+                // При ошибке оставляем уведомление с причиной.
+                stopForeground(completed || cancelled.get());
+                if (completed || cancelled.get()) nm.cancel(NOTIF_ID);
                 stopSelf();
             }
         });
@@ -150,7 +177,27 @@ public class HlsDownloadService extends Service {
     }
 
     private interface Progress {
-        void on(int pct);
+        void on(int pct, int completed, int total, long bytes, long elapsedMs);
+    }
+
+    private interface CopyProgress {
+        void on(long copied, long total);
+    }
+
+    private static long rate(long bytes, long elapsedMs) {
+        return bytes * 1000L / Math.max(1L, elapsedMs);
+    }
+
+    private static String formatDuration(long millis) {
+        long seconds = Math.max(0, millis / 1000);
+        return String.format(java.util.Locale.ROOT, "%02d:%02d", seconds / 60, seconds % 60);
+    }
+
+    private static String formatBytes(long bytes) {
+        if (bytes < 1024) return bytes + " Б";
+        if (bytes < 1024L * 1024L) return String.format(java.util.Locale.ROOT, "%.1f КБ", bytes / 1024.0);
+        if (bytes < 1024L * 1024L * 1024L) return String.format(java.util.Locale.ROOT, "%.1f МБ", bytes / (1024.0 * 1024.0));
+        return String.format(java.util.Locale.ROOT, "%.2f ГБ", bytes / (1024.0 * 1024.0 * 1024.0));
     }
 
     private static class HlsKey {
@@ -223,11 +270,15 @@ public class HlsDownloadService extends Service {
                 fos.write(init);
             }
             int total = segs.size();
+            long totalBytes = 0;
+            long downloadStarted = SystemClock.elapsedRealtime();
             for (int i = 0; i < total; i++) {
                 if (cancelled.get()) throw new IllegalStateException("Отменено");
                 byte[] data = fetchSegment(segs.get(i), keys);
                 fos.write(data);
-                progress.on((i + 1) * 100 / total);
+                totalBytes += data.length;
+                progress.on((i + 1) * 100 / total, i + 1, total,
+                        totalBytes, SystemClock.elapsedRealtime() - downloadStarted);
             }
         }
         return out;
@@ -321,7 +372,7 @@ public class HlsDownloadService extends Service {
         }
     }
 
-    private void saveToDownloads(File src, String name, String mime) throws Exception {
+    private void saveToDownloads(File src, String name, String mime, CopyProgress progress) throws Exception {
         if (Build.VERSION.SDK_INT >= 29) {
             ContentValues values = new ContentValues();
             values.put(MediaStore.Downloads.DISPLAY_NAME, name);
@@ -334,7 +385,18 @@ public class HlsDownloadService extends Service {
                 if (out == null) throw new IllegalStateException("out");
                 byte[] buf = new byte[128 * 1024];
                 int n;
-                while ((n = in.read(buf)) >= 0) out.write(buf, 0, n);
+                long copied = 0;
+                long lastUpdate = SystemClock.elapsedRealtime();
+                long total = src.length();
+                while ((n = in.read(buf)) >= 0) {
+                    out.write(buf, 0, n);
+                    copied += n;
+                    long now = SystemClock.elapsedRealtime();
+                    if (now - lastUpdate >= 350 || copied >= total) {
+                        progress.on(copied, total);
+                        lastUpdate = now;
+                    }
+                }
             }
         } else {
             File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
@@ -344,7 +406,18 @@ public class HlsDownloadService extends Service {
                  OutputStream out = new FileOutputStream(new File(dir, name))) {
                 byte[] buf = new byte[128 * 1024];
                 int n;
-                while ((n = in.read(buf)) >= 0) out.write(buf, 0, n);
+                long copied = 0;
+                long lastUpdate = SystemClock.elapsedRealtime();
+                long total = src.length();
+                while ((n = in.read(buf)) >= 0) {
+                    out.write(buf, 0, n);
+                    copied += n;
+                    long now = SystemClock.elapsedRealtime();
+                    if (now - lastUpdate >= 350 || copied >= total) {
+                        progress.on(copied, total);
+                        lastUpdate = now;
+                    }
+                }
             }
         }
         //noinspection ResultOfMethodCallIgnored
