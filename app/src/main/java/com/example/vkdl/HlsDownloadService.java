@@ -335,6 +335,7 @@ public class HlsDownloadService extends Service {
             final java.util.HashMap<Integer, Integer> tracks = new java.util.HashMap<>();
             boolean done;
             long baseUs;
+            long nextTimeUs = -1L;
         }
         List<MuxSrc> srcs = new ArrayList<>();
         long muxStarted = SystemClock.elapsedRealtime();
@@ -362,26 +363,40 @@ public class HlsDownloadService extends Service {
                     }
                 }
             }
+            // Прямой буфер уменьшает лишнее копирование между MediaExtractor и MediaMuxer.
+            // На API 28+ размер расширяется точно под текущий сэмпл; на старых API оставляем запас.
             muxer.start();
             started = true;
-            ByteBuffer buffer = ByteBuffer.allocate(1024 * 1024);
+            ByteBuffer buffer = ByteBuffer.allocateDirect(8 * 1024 * 1024);
             android.media.MediaCodec.BufferInfo info = new android.media.MediaCodec.BufferInfo();
+            for (MuxSrc src : srcs) {
+                src.nextTimeUs = src.ex.getSampleTime();
+                if (src.nextTimeUs < 0) src.done = true;
+            }
             while (true) {
                 MuxSrc best = null;
                 long bestT = Long.MAX_VALUE;
-                boolean any = false;
-                for (MuxSrc s : srcs) {
-                    if (s.done) continue;
-                    any = true;
-                    long raw = s.ex.getSampleTime();
-                    if (raw < 0) { s.done = true; continue; }
-                    long t = raw - s.baseUs;
-                    if (t < bestT) { best = s; bestT = t; }
+                for (MuxSrc src : srcs) {
+                    if (!src.done && src.nextTimeUs >= 0) {
+                        long t = src.nextTimeUs - src.baseUs;
+                        if (t < bestT) { best = src; bestT = t; }
+                    }
                 }
-                if (!any || best == null) break;
+                if (best == null) break;
+
+                if (Build.VERSION.SDK_INT >= 28) {
+                    long sampleSize = best.ex.getSampleSize();
+                    if (sampleSize > buffer.capacity() && sampleSize <= Integer.MAX_VALUE) {
+                        buffer = ByteBuffer.allocateDirect((int) sampleSize);
+                    }
+                }
                 buffer.clear();
                 int size = best.ex.readSampleData(buffer, 0);
-                if (size < 0) { best.done = true; continue; }
+                if (size < 0) {
+                    best.done = true;
+                    best.nextTimeUs = -1L;
+                    continue;
+                }
                 Integer track = best.tracks.get(best.ex.getSampleTrackIndex());
                 if (track != null) {
                     int flags = (best.ex.getSampleFlags() & MediaExtractor.SAMPLE_FLAG_SYNC) != 0
@@ -390,15 +405,21 @@ public class HlsDownloadService extends Service {
                     muxer.writeSampleData(track, buffer, info);
                 }
                 best.ex.advance();
+                best.nextTimeUs = best.ex.getSampleTime();
+                if (best.nextTimeUs < 0) best.done = true;
                 samplesWritten++;
-                long now = SystemClock.elapsedRealtime();
-                if (now - lastMuxNotice >= 1500) {
-                    String details = "Этап 3/4 — Сборка MP4\nОбработано фрагментов: " + samplesWritten
-                            + "\nВремя обработки: " + formatDuration(now - muxStarted)
-                            + "\nИдёт объединение аудио и видео на устройстве…";
-                    nm.notify(NOTIF_ID, notif(details, 0, true));
-                    DownloadProgress.send(this, details, -1, false, false);
-                    lastMuxNotice = now;
+
+                // Не проверяем часы и не обновляем UI после каждого видеокадра.
+                if ((samplesWritten & 0x3FF) == 0) {
+                    long now = SystemClock.elapsedRealtime();
+                    if (now - lastMuxNotice >= 1500) {
+                        String details = "Этап 3/4 — Сборка MP4\\nОбработано сэмплов: " + samplesWritten
+                                + "\\nВремя обработки: " + formatDuration(now - muxStarted)
+                                + "\\nПерепаковка без перекодирования — нагрузка зависит от скорости накопителя и размера видео.";
+                        nm.notify(NOTIF_ID, notif(details, 0, true));
+                        DownloadProgress.send(this, details, -1, false, false);
+                        lastMuxNotice = now;
+                    }
                 }
             }
         } finally {
