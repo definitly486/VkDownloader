@@ -101,7 +101,10 @@ public class MainActivity extends Activity {
             downloadProgress.setVisibility(finished || failed ? View.GONE : View.VISIBLE);
             downloadProgress.setIndeterminate(pct < 0 && !finished && !failed);
             if (pct >= 0) downloadProgress.setProgress(Math.max(0, Math.min(100, pct)));
-            if (finished || failed) getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            if (finished || failed) {
+                cancelDownloadButton.setVisibility(View.GONE);
+                getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
         }
     };
 
