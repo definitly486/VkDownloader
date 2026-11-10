@@ -312,6 +312,9 @@ public class HlsDownloadService extends Service {
             long baseUs;
         }
         List<MuxSrc> srcs = new ArrayList<>();
+        long muxStarted = SystemClock.elapsedRealtime();
+        long lastMuxNotice = muxStarted;
+        long samplesWritten = 0;
         MediaMuxer muxer = null;
         boolean started = false;
         try {
@@ -362,6 +365,15 @@ public class HlsDownloadService extends Service {
                     muxer.writeSampleData(track, buffer, info);
                 }
                 best.ex.advance();
+                samplesWritten++;
+                long now = SystemClock.elapsedRealtime();
+                if (now - lastMuxNotice >= 1500) {
+                    nm.notify(NOTIF_ID, notif(
+                            "Этап 3/4 — Сборка MP4\\nОбработано фрагментов: " + samplesWritten
+                                    + "\\nВремя обработки: " + formatDuration(now - muxStarted)
+                                    + "\\nИдёт объединение аудио и видео на устройстве…", 0, true));
+                    lastMuxNotice = now;
+                }
             }
         } finally {
             if (muxer != null) {
