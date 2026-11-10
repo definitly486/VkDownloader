@@ -48,6 +48,7 @@ public class HlsDownloadService extends Service {
     public static final String EXTRA_AUDIO_URL = "audio_url";
     public static final String EXTRA_HEIGHT = "height";
     public static final String EXTRA_VIDEO_ID = "video_id";
+    public static final String ACTION_CANCEL = "com.example.vkdl.action.CANCEL_HLS";
 
     private static final String UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -86,6 +87,16 @@ public class HlsDownloadService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_CANCEL.equals(intent.getAction())) {
+            cancelled.set(true);
+            Future<?> current = work;
+            if (current != null) current.cancel(true);
+            DownloadProgress.send(this, "Загрузка отменена", -1, true, false);
+            nm.cancel(NOTIF_ID);
+            stopForeground(true);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         if (intent == null) {
             stopSelf();
             return START_NOT_STICKY;
