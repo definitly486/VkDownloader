@@ -104,6 +104,7 @@ public class HlsDownloadService extends Service {
             try {
                 String label = height > 0 ? height + "p" : "hls";
                 nm.notify(NOTIF_ID, notif("HLS " + label + "…", 0, true));
+                DownloadProgress.send(this, "Этап 1/4 — Подготовка видео " + label + "…\nПолучение плейлиста.", 0, false, false);
                 long startedAt = SystemClock.elapsedRealtime();
                 File videoFile = downloadPlaylist(url, (pct, done, total, bytes, elapsed) ->
                         nm.notify(NOTIF_ID, notif(
@@ -111,6 +112,10 @@ public class HlsDownloadService extends Service {
                                         + " (" + pct + "%)\nПолучено: " + formatBytes(bytes)
                                         + " · Скорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
                                         + " · Время: " + formatDuration(elapsed), pct, true)));
+                        DownloadProgress.send(this, "Этап 1/4 — Видео " + label + "\nСегменты: " + done + "/" + total
+                                + " (" + pct + "%)\nПолучено: " + formatBytes(bytes)
+                                + "\nСкорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
+                                + "\nВремя этапа: " + formatDuration(elapsed), pct, false, false);
                 File audioFile = null;
                 if (audioUrl != null && !audioUrl.isEmpty()) {
                     audioFile = downloadPlaylist(audioUrl, (pct, done, total, bytes, elapsed) ->
@@ -119,6 +124,10 @@ public class HlsDownloadService extends Service {
                                             + " (" + pct + "%)\nПолучено: " + formatBytes(bytes)
                                             + " · Скорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
                                             + " · Время: " + formatDuration(elapsed), pct, true)));
+                            DownloadProgress.send(this, "Этап 2/4 — Аудио\nСегменты: " + done + "/" + total
+                                    + " (" + pct + "%)\nПолучено: " + formatBytes(bytes)
+                                    + "\nСкорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
+                                    + "\nВремя этапа: " + formatDuration(elapsed), pct, false, false);
                 }
                 String outName = "vk_" + (videoId != null ? videoId : "video") + "_" + label + ".mp4";
                 File out = new File(getCacheDir(), outName);
@@ -126,6 +135,7 @@ public class HlsDownloadService extends Service {
                     nm.notify(NOTIF_ID, notif(
                             "Этап 3/4 — Сборка MP4\nОбъединение видео и аудио. Это локальная обработка, "
                                     + "скорость сети здесь уже не влияет.", 0, true));
+                    DownloadProgress.send(this, "Этап 3/4 — Сборка MP4\nОбъединение аудио и видео на устройстве.\nСкорость сети здесь уже не влияет.", -1, false, false);
                     muxToMp4(java.util.Arrays.asList(videoFile, audioFile), out);
                     videoFile.delete();
                     audioFile.delete();
@@ -150,6 +160,7 @@ public class HlsDownloadService extends Service {
                 nm.notify(NOTIF_ID, notif(
                         "Этап 4/4 — Сохранение\nКопирование " + formatBytes(out.length())
                                 + " в папку «Загрузки»…", 0, true));
+                DownloadProgress.send(this, "Этап 4/4 — Сохранение\nКопирование " + formatBytes(out.length()) + " в папку «Загрузки»…", 0, false, false);
                 saveToDownloads(out, outName, mime, (copied, total) -> {
                     int pct = total > 0 ? (int) Math.min(100, copied * 100 / total) : 0;
                     long elapsed = Math.max(1, SystemClock.elapsedRealtime() - startedAt);
@@ -158,16 +169,23 @@ public class HlsDownloadService extends Service {
                                     + formatBytes(total) + " (" + pct + "%)\nСкорость: "
                                     + formatBytes(rate(copied, elapsed)) + "/с · Время: "
                                     + formatDuration(elapsed), pct, true));
+                    DownloadProgress.send(this, "Этап 4/4 — Сохранение файла\n" + formatBytes(copied) + " / "
+                            + formatBytes(total) + " (" + pct + "%)\nСкорость: "
+                            + formatBytes(rate(copied, elapsed)) + "/с\nОбщее время: " + formatDuration(elapsed), pct, false, false);
                 });
                 completed = true;
                 nm.notify(NOTIF_ID, notif("Готово: " + outName, 100, false));
+                DownloadProgress.send(this, "Загрузка завершена\nФайл сохранён: " + outName, 100, true, false);
             } catch (Exception e) {
                 if (!cancelled.get()) {
-                    nm.notify(NOTIF_ID, notif("Ошибка: " + e.getMessage(), 0, false));
+                    String error = "Ошибка загрузки\n" + e.getClass().getSimpleName() + ": " + e.getMessage();
+                    nm.notify(NOTIF_ID, notif(error, 0, false));
+                    DownloadProgress.send(this, error, -1, false, true);
                 }
             } finally {
                 // Убираем устаревший прогресс после успешного завершения.
                 // При ошибке оставляем уведомление с причиной.
+                if (cancelled.get()) DownloadProgress.send(this, "Загрузка отменена", -1, true, false);
                 stopForeground(completed || cancelled.get());
                 if (completed || cancelled.get()) nm.cancel(NOTIF_ID);
                 stopSelf();
