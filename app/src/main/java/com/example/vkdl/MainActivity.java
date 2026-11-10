@@ -8,6 +8,9 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.content.Intent;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
@@ -86,6 +89,21 @@ public class MainActivity extends Activity {
     private String videoId = "video";
     private String lastHlsMaster;
     private long activeDownloadId = -1L;
+    private boolean progressReceiverRegistered;
+    private final BroadcastReceiver downloadProgressReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (intent == null || !DownloadProgress.ACTION.equals(intent.getAction())) return;
+            String details = intent.getStringExtra(DownloadProgress.EXTRA_DETAILS);
+            int pct = intent.getIntExtra(DownloadProgress.EXTRA_PERCENT, -1);
+            boolean finished = intent.getBooleanExtra(DownloadProgress.EXTRA_FINISHED, false);
+            boolean failed = intent.getBooleanExtra(DownloadProgress.EXTRA_FAILED, false);
+            status.setText(details == null ? "Загрузка выполняется…" : details);
+            downloadProgress.setVisibility(finished || failed ? View.GONE : View.VISIBLE);
+            downloadProgress.setIndeterminate(pct < 0 && !finished && !failed);
+            if (pct >= 0) downloadProgress.setProgress(Math.max(0, Math.min(100, pct)));
+            if (finished || failed) getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -192,6 +210,10 @@ public class MainActivity extends Activity {
         root.addView(livePage, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         setContentView(root);
+        IntentFilter progressFilter = new IntentFilter(DownloadProgress.ACTION);
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(downloadProgressReceiver, progressFilter, Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(downloadProgressReceiver, progressFilter);
+        progressReceiverRegistered = true;
 
         askPermissions();
         handleIntent(getIntent());
@@ -205,6 +227,10 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (progressReceiverRegistered) {
+            try { unregisterReceiver(downloadProgressReceiver); } catch (Exception ignored) {}
+            progressReceiverRegistered = false;
+        }
         io.shutdownNow();
         super.onDestroy();
     }
@@ -738,13 +764,20 @@ public class MainActivity extends Activity {
         cancelDownloadButton.setVisibility(View.VISIBLE);
         activeDownloadId = -3L;
         downloadProgress.setIndeterminate(false);
-        status.setText("Загрузка в фоне. Смотрите уведомление.");
+        status.setText("Подготовка загрузки…\nОжидание данных от сервиса.");
+        downloadProgress.setVisibility(View.VISIBLE);
+        downloadProgress.setIndeterminate(true);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
     private void downloadHls(VideoOption opt) {
         String label = opt.height > 0 ? opt.height + "p" : "hls";
         HlsDownloadService.start(this, opt.url, opt.audioUrl, opt.height, videoId);
-        status.setText("Фоновая HLS-загрузка (" + label + ")\nПрогресс — в уведомлении.");
+        status.setText("Подготовка HLS-загрузки (" + label + ")…\nОжидание данных от сервиса.");
+        downloadProgress.setVisibility(View.VISIBLE);
+        downloadProgress.setIndeterminate(true);
+        cancelDownloadButton.setVisibility(View.GONE);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         Toast.makeText(this, "HLS в фоне (" + label + ")", Toast.LENGTH_LONG).show();
     }
 }
