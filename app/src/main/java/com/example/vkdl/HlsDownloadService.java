@@ -107,20 +107,20 @@ public class HlsDownloadService extends Service {
                 DownloadProgress.send(this, "Этап 1/4 — Подготовка видео " + label + "…\nПолучение плейлиста.", 0, false, false);
                 long startedAt = SystemClock.elapsedRealtime();
                 File videoFile = downloadPlaylist(url, (pct, done, total, bytes, elapsed) -> {
-                    String details = "Этап 1/4 — Видео " + label + "\\nСегменты: " + done + "/" + total
-                            + " (" + pct + "%)\\nПолучено: " + formatBytes(bytes)
-                            + "\\nСкорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
-                            + "\\nВремя этапа: " + formatDuration(elapsed);
+                    String details = "Этап 1/4 — Видео " + label + "\nСегменты: " + done + "/" + total
+                            + " (" + pct + "%)\nПолучено: " + formatBytes(bytes)
+                            + "\nСкорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
+                            + "\nВремя этапа: " + formatDuration(elapsed);
                     nm.notify(NOTIF_ID, notif(details, pct, true));
                     DownloadProgress.send(this, details, pct, false, false);
                 });
                 File audioFile = null;
                 if (audioUrl != null && !audioUrl.isEmpty()) {
                     audioFile = downloadPlaylist(audioUrl, (pct, done, total, bytes, elapsed) -> {
-                        String details = "Этап 2/4 — Аудио\\nСегменты: " + done + "/" + total
-                                + " (" + pct + "%)\\nПолучено: " + formatBytes(bytes)
-                                + "\\nСкорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
-                                + "\\nВремя этапа: " + formatDuration(elapsed);
+                        String details = "Этап 2/4 — Аудио\nСегменты: " + done + "/" + total
+                                + " (" + pct + "%)\nПолучено: " + formatBytes(bytes)
+                                + "\nСкорость: " + formatBytes(rate(bytes, elapsed)) + "/с"
+                                + "\nВремя этапа: " + formatDuration(elapsed);
                         nm.notify(NOTIF_ID, notif(details, pct, true));
                         DownloadProgress.send(this, details, pct, false, false);
                     });
@@ -383,9 +383,9 @@ public class HlsDownloadService extends Service {
                 long now = SystemClock.elapsedRealtime();
                 if (now - lastMuxNotice >= 1500) {
                     nm.notify(NOTIF_ID, notif(
-                            "Этап 3/4 — Сборка MP4\\nОбработано фрагментов: " + samplesWritten
-                                    + "\\nВремя обработки: " + formatDuration(now - muxStarted)
-                                    + "\\nИдёт объединение аудио и видео на устройстве…", 0, true));
+                            "Этап 3/4 — Сборка MP4\nОбработано фрагментов: " + samplesWritten
+                                    + "\nВремя обработки: " + formatDuration(now - muxStarted)
+                                    + "\nИдёт объединение аудио и видео на устройстве…", 0, true));
                     lastMuxNotice = now;
                 }
             }
